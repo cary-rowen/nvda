@@ -74,7 +74,7 @@ def _getAutoStartConfiguration(hkey: winreg._KeyType) -> List[str]:
 		log.debug("Unable to find existing auto start registry key")
 		return []
 	except WindowsError:
-		log.error("Unable to open auto start registry key for reading")
+		log.error("Unable to open auto start registry key for reading", exc_info=True)
 		return []
 
 	try:

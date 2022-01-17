@@ -107,9 +107,16 @@ def isInstalledCopy() -> bool:
 
 	try:
 		instDir = winreg.QueryValueEx(k, "UninstallDirectory")[0]
+	except FileNotFoundError:
+		log.debug(
+			f"Unable to find UninstallDirectory value for {_RegKey.INSTALLED_COPY}"
+			"- this may not be an installed copy."
+		)
+		return False
 	except WindowsError:
 		log.error("Unable to query isInstalledCopy registry key", exc_info=True)
 		return False
+
 	winreg.CloseKey(k)
 	try:
 		return os.stat(instDir) == os.stat(globalVars.appDir)
@@ -324,7 +331,7 @@ def getStartOnLogonScreen() -> bool:
 	try:
 		return bool(winreg.QueryValueEx(k, "startOnLogonScreen")[0])
 	except FileNotFoundError:
-		log.debug("Could not find startOnLogonScreen value for {_RegKey.NVDA} - likely unset.")
+		log.debug(f"Could not find startOnLogonScreen value for {_RegKey.NVDA} - likely unset.")
 		return False
 	except WindowsError:
 		log.error(f"Failed to query startOnLogonScreen value for {_RegKey.NVDA}", exc_info=True)
