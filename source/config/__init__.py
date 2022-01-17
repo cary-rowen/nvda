@@ -1,5 +1,5 @@
 # A part of NonVisual Desktop Access (NVDA)
-# Copyright (C) 2006-2021 NV Access Limited, Aleksey Sadovoy, Peter Vágner, Rui Batista, Zahari Yurukov,
+# Copyright (C) 2006-2022 NV Access Limited, Aleksey Sadovoy, Peter Vágner, Rui Batista, Zahari Yurukov,
 # Joseph Lee, Babbage B.V., Łukasz Golonka, Julien Cochuyt
 # This file is covered by the GNU General Public License.
 # See the file COPYING for more details.
@@ -10,6 +10,7 @@ In addition, this module provides three actions: profile switch notifier, an act
 For the latter two actions, one can perform actions prior to and/or after they take place.
 """
 
+from enum import Enum
 import globalVars
 import winreg
 import ctypes
@@ -73,42 +74,94 @@ def saveOnExit():
 		except:
 			pass
 
-def isInstalledCopy():
+
+class _RegKey(str, Enum):
+	INSTALLED_COPY = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\NVDA"
+	RUN = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+	NVDA = r"SOFTWARE\NVDA"
+	r"""
+	The name of the registry key stored under HKEY_LOCAL_MACHINE where system wide NVDA settings are stored.
+	Note that NVDA is a 32-bit application, so on X64 systems, this will evaluate to `r"SOFTWARE\WOW6432Node\nvda"`
+	"""
+
+
+def isInstalledCopy() -> bool:
 	"""Checks to see if this running copy of NVDA is installed on the system"""
 	try:
-		k=winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\NVDA")
-		instDir=winreg.QueryValueEx(k,"UninstallDirectory")[0]
+		k = winreg.OpenKey(
+			winreg.HKEY_LOCAL_MACHINE,
+			_RegKey.INSTALLED_COPY
+		)
+	except FileNotFoundError:
+		log.debug(
+			f"Unable to find isInstalledCopy registry key {_RegKey.INSTALLED_COPY}"
+			"- this is not an installed copy."
+		)
+		return False
 	except WindowsError:
+		log.error(
+			f"Unable to open isInstalledCopy registry key {_RegKey.INSTALLED_COPY}",
+			exc_info=True
+		)
+		return False
+
+	try:
+		instDir = winreg.QueryValueEx(k, "UninstallDirectory")[0]
+	except WindowsError:
+		log.error("Unable to query isInstalledCopy registry key", exc_info=True)
 		return False
 	winreg.CloseKey(k)
 	try:
 		return os.stat(instDir) == os.stat(globalVars.appDir)
 	except WindowsError:
+		log.error(
+			"Failed to access the installed NVDA directory,"
+			"or, a portable copy failed to access the current NVDA app directory",
+			exc_info=True
+		)
 		return False
 
 
-#: #6864: The name of the subkey stored under NVDA_REGKEY where the value is stored
-#: which will make an installed NVDA load the user configuration either from the local or from the roaming application data profile.
-#: The registry value is unset by default.
-#: When setting it manually, a DWORD value is prefered.
-#: A value of 0 will evaluate to loading the configuration from the roaming application data (default).
-#: A value of 1 means loading the configuration from the local application data folder.
-#: @type: str
-CONFIG_IN_LOCAL_APPDATA_SUBKEY=u"configInLocalAppData"
+CONFIG_IN_LOCAL_APPDATA_SUBKEY = "configInLocalAppData"
+"""
+#6864: The name of the subkey stored under NVDA_REGKEY where the value is stored
+which will make an installed NVDA load the user configuration either from the local or from
+the roaming application data profile.
+The registry value is unset by default.
+When setting it manually, a DWORD value is preferred.
+A value of 0 will evaluate to loading the configuration from the roaming application data (default).
+A value of 1 means loading the configuration from the local application data folder.
+"""
 
-def getInstalledUserConfigPath():
+
+def getInstalledUserConfigPath() -> Optional[str]:
 	try:
 		k = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, NVDA_REGKEY)
-		configInLocalAppData = bool(winreg.QueryValueEx(k, CONFIG_IN_LOCAL_APPDATA_SUBKEY)[0])
 	except WindowsError:
-		configInLocalAppData=False
+		log.error("Could not find nvda registry key", exc_info=True)
+		configInLocalAppData = False
+
+	try:
+		configInLocalAppData = bool(winreg.QueryValueEx(k, CONFIG_IN_LOCAL_APPDATA_SUBKEY)[0])
+	except FileNotFoundError:
+		log.debug("Installed user config is not in local app data")
+		configInLocalAppData = False
+	except WindowsError:
+		log.error(
+			f"Could not query if user config in local app data {CONFIG_IN_LOCAL_APPDATA_SUBKEY}",
+			exc_info=True
+		)
+		configInLocalAppData = False
 	configParent = shlobj.SHGetKnownFolderPath(
 		shlobj.FolderId.LOCAL_APP_DATA if configInLocalAppData else shlobj.FolderId.ROAMING_APP_DATA
 	)
 	try:
 		return os.path.join(configParent, "nvda")
 	except WindowsError:
+		# (#PRnum) There is some uncertainty as to how this could be caused
+		log.debugWarning("Installed user config is not in local app data", exc_info=True)
 		return None
+
 
 def getUserDefaultConfigPath(useInstalledPathIfExists=False):
 	"""Get the default path for the user configuration directory.
@@ -181,22 +234,49 @@ def initConfigPath(configPath=None):
 		if not os.path.isdir(subdir):
 			os.makedirs(subdir)
 
-RUN_REGKEY = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
 
-def getStartAfterLogon():
+def getStartAfterLogon() -> bool:
 	if (
 		easeOfAccess.canConfigTerminateOnDesktopSwitch
 		and easeOfAccess.willAutoStart(winreg.HKEY_CURRENT_USER)
 	):
 		return True
 	try:
-		k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_REGKEY)
-		val = winreg.QueryValueEx(k, u"nvda")[0]
-		return os.stat(val) == os.stat(sys.argv[0])
-	except (WindowsError, OSError):
+		k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RegKey.RUN)
+	except FileNotFoundError:
+		log.debugWarning(
+			f"Unable to find run registry key {_RegKey.RUN}",
+			exc_info=True
+		)
+		return False
+	except WindowsError:
+		log.error(
+			f"Unable to open run registry key {_RegKey.RUN}",
+			exc_info=True
+		)
 		return False
 
-def setStartAfterLogon(enable):
+	try:
+		val = winreg.QueryValueEx(k, "nvda")[0]
+	except FileNotFoundError:
+		log.debug("NVDA is not set to start after logon")
+		return False
+	except WindowsError:
+		log.error("Failed to query NVDA key to set start after logon", exc_info=True)
+		return False
+
+	try:
+		return os.stat(val) == os.stat(sys.argv[0])
+	except WindowsError:
+		log.error(
+			"Failed to access the current running NVDA directory,"
+			" or the start after logon app directory",
+			exc_info=True
+		)
+		return False
+
+
+def setStartAfterLogon(enable: bool) -> None:
 	if getStartAfterLogon() == enable:
 		return
 	if easeOfAccess.canConfigTerminateOnDesktopSwitch:
@@ -208,34 +288,52 @@ def setStartAfterLogon(enable):
 		run = False
 	else:
 		run = enable
-	k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_REGKEY, 0, winreg.KEY_WRITE)
+	k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RegKey.RUN, 0, winreg.KEY_WRITE)
 	if run:
-		winreg.SetValueEx(k, u"nvda", None, winreg.REG_SZ, sys.argv[0])
+		winreg.SetValueEx(k, "nvda", None, winreg.REG_SZ, sys.argv[0])
 	else:
 		try:
-			winreg.DeleteValue(k, u"nvda")
+			winreg.QueryValue(k, "nvda")
+		except FileNotFoundError:
+			log.debug(
+				"The run registry key is not set for setStartAfterLogon."
+				"This is expected for Windows 8+ which uses ease of access"
+			)
+			return
+		try:
+			winreg.DeleteValue(k, "nvda")
 		except WindowsError:
-			pass
-
+			log.error(
+				"Couldn't unset registry key for nvda to start after logon.",
+				exc_info=True
+			)
 
 
 SLAVE_FILENAME = os.path.join(globalVars.appDir, "nvda_slave.exe")
 
-#: The name of the registry key stored under  HKEY_LOCAL_MACHINE where system wide NVDA settings are stored.
-#: Note that NVDA is a 32-bit application, so on X64 systems, this will evaluate to "SOFTWARE\WOW6432Node\nvda"
-NVDA_REGKEY = r"SOFTWARE\NVDA"
 
-def getStartOnLogonScreen():
+def getStartOnLogonScreen() -> bool:
 	if easeOfAccess.willAutoStart(winreg.HKEY_LOCAL_MACHINE):
 		return True
 	try:
-		k = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, NVDA_REGKEY)
-		return bool(winreg.QueryValueEx(k, u"startOnLogonScreen")[0])
+		k = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, _RegKey.NVDA)
+	except FileNotFoundError:
+		log.debugWarning(f"Could not find NVDA reg key {_RegKey.NVDA}", exc_info=True)
 	except WindowsError:
+		log.error(f"Failed to open NVDA reg key {_RegKey.NVDA}", exc_info=True)
+	try:
+		return bool(winreg.QueryValueEx(k, "startOnLogonScreen")[0])
+	except FileNotFoundError:
+		log.debug("Could not find startOnLogonScreen value for {_RegKey.NVDA} - likely unset.")
+		return False
+	except WindowsError:
+		log.error(f"Failed to query startOnLogonScreen value for {_RegKey.NVDA}", exc_info=True)
 		return False
 
-def _setStartOnLogonScreen(enable):
+
+def _setStartOnLogonScreen(enable: bool) -> None:
 	easeOfAccess.setAutoStart(winreg.HKEY_LOCAL_MACHINE, enable)
+
 
 def setSystemConfigToCurrentConfig():
 	fromPath = globalVars.appArgs.configPath
@@ -286,6 +384,7 @@ def setStartOnLogonScreen(enable):
 		# Try setting it directly.
 		_setStartOnLogonScreen(enable)
 	except WindowsError:
+		log.debugWarning("Failed to set start on logon screens config.")
 		# We probably don't have admin privs, so we need to elevate to do this using the slave.
 		import systemUtils
 		if systemUtils.execElevated(

@@ -1,13 +1,14 @@
 # A part of NonVisual Desktop Access (NVDA)
-# Copyright (C) 2014-2021 NV Access Limited
+# Copyright (C) 2014-2022 NV Access Limited
 # This file is covered by the GNU General Public License.
 # See the file COPYING for more details.
 
 """Utilities for working with the Windows Ease of Access Center.
 """
 
+from typing import List
+from logHandler import log
 import winreg
-import ctypes
 import winUser
 import winVersion
 
@@ -18,13 +19,18 @@ ROOT_KEY = r"Software\Microsoft\Windows NT\CurrentVersion\Accessibility"
 APP_KEY_NAME = "nvda_nvda_v1"
 APP_KEY_PATH = r"%s\ATs\%s" % (ROOT_KEY, APP_KEY_NAME)
 
-def isRegistered():
+
+def isRegistered() -> bool:
 	try:
 		winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, APP_KEY_PATH, 0,
 			winreg.KEY_READ | winreg.KEY_WOW64_64KEY)
 		return True
+	except FileNotFoundError:
+		log.debug("Unable to find AT registry key")
 	except WindowsError:
-		return False
+		log.error("Unable to open AT registry key", exc_info=True)
+	return False
+
 
 def notify(signal):
 	if not isRegistered():
@@ -55,28 +61,41 @@ def notify(signal):
 		inputs.append(input)
 	winUser.SendInput(inputs)
 
-def willAutoStart(hkey):
+
+def willAutoStart(hkey: winreg._KeyType) -> bool:
+	return (APP_KEY_NAME in _getAutoStartConfiguration(hkey))
+
+
+def _getAutoStartConfiguration(hkey: winreg._KeyType) -> List[str]:
 	try:
 		k = winreg.OpenKey(hkey, ROOT_KEY, 0,
 			winreg.KEY_READ | winreg.KEY_WOW64_64KEY)
-		return (APP_KEY_NAME in
-			winreg.QueryValueEx(k, "Configuration")[0].split(","))
+	except FileNotFoundError:
+		log.debug("Unable to find existing auto start registry key")
+		return []
 	except WindowsError:
-		return False
+		log.error("Unable to open auto start registry key for reading")
+		return []
 
-def setAutoStart(hkey, enable):
-	k = winreg.OpenKey(hkey, ROOT_KEY, 0,
-		winreg.KEY_READ | winreg.KEY_WRITE | winreg.KEY_WOW64_64KEY)
 	try:
-		conf = winreg.QueryValueEx(k, "Configuration")[0].split(",")
+		conf: List[str] = winreg.QueryValueEx(k, "Configuration")[0].split(",")
+	except FileNotFoundError:
+		log.debug("Unable to find auto start configuration")
 	except WindowsError:
-		conf = []
+		log.error("Unable to query auto start configuration", exc_info=True)
 	else:
 		if not conf[0]:
 			# "".split(",") returns [""], so remove the empty string.
 			del conf[0]
-	changed = False
-	if enable and APP_KEY_NAME not in conf:
+		return conf
+	return []
+
+
+def setAutoStart(hkey: winreg._KeyType, enable: bool) -> None:
+	"""Raises `Union[WindowsError, FileNotFoundError]`"""
+	conf = _getAutoStartConfiguration(hkey)
+	currentlyEnabled = APP_KEY_NAME in conf
+	if enable and not currentlyEnabled:
 		conf.append(APP_KEY_NAME)
 		changed = True
 	elif not enable:
@@ -86,5 +105,7 @@ def setAutoStart(hkey, enable):
 		except ValueError:
 			pass
 	if changed:
+		k = winreg.OpenKey(hkey, ROOT_KEY, 0,
+			winreg.KEY_READ | winreg.KEY_WRITE | winreg.KEY_WOW64_64KEY)
 		winreg.SetValueEx(k, "Configuration", None, winreg.REG_SZ,
 			",".join(conf))
