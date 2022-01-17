@@ -81,7 +81,8 @@ class _RegKey(str, Enum):
 	NVDA = r"SOFTWARE\NVDA"
 	r"""
 	The name of the registry key stored under HKEY_LOCAL_MACHINE where system wide NVDA settings are stored.
-	Note that NVDA is a 32-bit application, so on X64 systems, this will evaluate to `r"SOFTWARE\WOW6432Node\nvda"`
+	Note that NVDA is a 32-bit application, so on X64 systems,
+	this will evaluate to `r"SOFTWARE\WOW6432Node\nvda"`
 	"""
 
 
@@ -143,7 +144,7 @@ A value of 1 means loading the configuration from the local application data fol
 
 def getInstalledUserConfigPath() -> Optional[str]:
 	try:
-		k = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, NVDA_REGKEY)
+		k = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, _RegKey.NVDA)
 	except WindowsError:
 		log.error("Could not find nvda registry key", exc_info=True)
 		configInLocalAppData = False

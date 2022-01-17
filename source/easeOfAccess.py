@@ -105,7 +105,11 @@ def setAutoStart(hkey: winreg._KeyType, enable: bool) -> None:
 		except ValueError:
 			pass
 	if changed:
-		k = winreg.OpenKey(hkey, ROOT_KEY, 0,
-			winreg.KEY_READ | winreg.KEY_WRITE | winreg.KEY_WOW64_64KEY)
+		k = winreg.OpenKey(
+			hkey,
+			ROOT_KEY,
+			0,
+			winreg.KEY_READ | winreg.KEY_WRITE | winreg.KEY_WOW64_64KEY
+		)
 		winreg.SetValueEx(k, "Configuration", None, winreg.REG_SZ,
 			",".join(conf))
