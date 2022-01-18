@@ -6,11 +6,17 @@
 """Utilities for working with the Windows Ease of Access Center.
 """
 
-from typing import List
+from typing import List, TYPE_CHECKING, Union
 from logHandler import log
 import winreg
 import winUser
 import winVersion
+
+
+if TYPE_CHECKING:
+	from winreg import HKEYType
+	_KeyType = Union[HKEYType, int]
+
 
 # Windows >= 8
 canConfigTerminateOnDesktopSwitch: bool = winVersion.getWinVer() >= winVersion.WIN8
@@ -62,11 +68,11 @@ def notify(signal):
 	winUser.SendInput(inputs)
 
 
-def willAutoStart(hkey: winreg._KeyType) -> bool:
+def willAutoStart(hkey: _KeyType) -> bool:
 	return (APP_KEY_NAME in _getAutoStartConfiguration(hkey))
 
 
-def _getAutoStartConfiguration(hkey: winreg._KeyType) -> List[str]:
+def _getAutoStartConfiguration(hkey: _KeyType) -> List[str]:
 	try:
 		k = winreg.OpenKey(hkey, ROOT_KEY, 0,
 			winreg.KEY_READ | winreg.KEY_WOW64_64KEY)
@@ -91,7 +97,7 @@ def _getAutoStartConfiguration(hkey: winreg._KeyType) -> List[str]:
 	return []
 
 
-def setAutoStart(hkey: winreg._KeyType, enable: bool) -> None:
+def setAutoStart(hkey: _KeyType, enable: bool) -> None:
 	"""Raises `Union[WindowsError, FileNotFoundError]`"""
 	conf = _getAutoStartConfiguration(hkey)
 	currentlyEnabled = APP_KEY_NAME in conf
