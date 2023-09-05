@@ -36,9 +36,6 @@ EXPECTED_MESSAGES_WITHOUT_COMMENTS = {
 	'sorted ascending',
 	'sorted descending',
 	'gesture map File Error',
-	'text \\"%s\\" not found',
-	'Find Error',
-	'on',
 	'Type help(object) to get help about object.',
 	'Type exit() to exit the console',
 	'NVDA Python Console',
@@ -59,7 +56,6 @@ EXPECTED_MESSAGES_WITHOUT_COMMENTS = {
 	'Display',
 	'left',
 	'right',
-	'Recognition failed',
 	'NVDA &web site',
 	'E&xit',
 	'Error renaming profile.',
@@ -116,7 +112,7 @@ def checkPot(fileName):
 	expectedErrors = 0
 	unexpectedSuccesses = 0
 	foundMessagesWithOutComments: Set[str] = set()
-	with open(fileName, "rt") as pot:
+	with open(fileName, "rt", encoding="utf-8") as pot:
 		passedHeader = False
 		for line in pot:
 			line = line.rstrip()

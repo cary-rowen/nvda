@@ -2,16 +2,21 @@
 # A part of NonVisual Desktop Access (NVDA)
 # This file is covered by the GNU General Public License.
 # See the file COPYING for more details.
-# Copyright (C) 2006-2021 NV Access Limited, Peter Vágner, Aleksey Sadovoy, Rui Batista, Joseph Lee,
+# Copyright (C) 2006-2023 NV Access Limited, Peter Vágner, Aleksey Sadovoy, Rui Batista, Joseph Lee,
 # Leonard de Ruijter, Derek Riemer, Babbage B.V., Davy Kager, Ethan Holliger, Łukasz Golonka, Accessolutions,
-# Julien Cochuyt, Jakub Lukowicz
+# Julien Cochuyt, Jakub Lukowicz, Bill Dengler, Cyrille Bougot, Rob Meredith, Luke Davis,
+# Burman's Computer and Education Ltd.
 
 import itertools
-
 from typing import (
+	List,
 	Optional,
 	Tuple,
 	Union,
+)
+from annotation import (
+	_AnnotationNavigation,
+	_AnnotationNavigationNode,
 )
 
 import audioDucking
@@ -29,8 +34,15 @@ from NVDAObjects import NVDAObject, NVDAObjectTextInfo
 import globalVars
 from logHandler import log
 import gui
+import systemUtils
 import wx
 import config
+from config.configFlags import (
+	TetherTo,
+	ShowMessages,
+)
+from config.featureFlag import FeatureFlag
+from config.featureFlagEnums import BoolFlag
 import winUser
 import appModuleHandler
 import winKernel
@@ -46,9 +58,12 @@ import inputCore
 import characterProcessing
 from baseObject import ScriptableObject
 import core
+from winAPI._powerTracking import reportCurrentBatteryStatus
 import winVersion
 from base64 import b16encode
 import vision
+from utils.security import objectBelowLockScreenAndWindowsIsLocked
+
 
 #: Script category for text review commands.
 # Translators: The name of a category of NVDA commands.
@@ -264,7 +279,10 @@ class GlobalCommands(ScriptableObject):
 	)
 	def script_dateTime(self,gesture):
 		if scriptHandler.getLastScriptRepeatCount()==0:
-			text=winKernel.GetTimeFormatEx(winKernel.LOCALE_NAME_USER_DEFAULT, winKernel.TIME_NOSECONDS, None, None)
+			if systemUtils._isSystemClockSecondsVisible():
+				text = winKernel.GetTimeFormatEx(winKernel.LOCALE_NAME_USER_DEFAULT, None, None, None)
+			else:
+				text = winKernel.GetTimeFormatEx(winKernel.LOCALE_NAME_USER_DEFAULT, winKernel.TIME_NOSECONDS, None, None)
 		else:
 			text=winKernel.GetDateFormatEx(winKernel.LOCALE_NAME_USER_DEFAULT, winKernel.DATE_LONGDATE, None, None)
 		ui.message(text)
@@ -592,29 +610,31 @@ class GlobalCommands(ScriptableObject):
 		description=_("Cycles through line indentation settings"),
 		category=SCRCAT_DOCUMENTFORMATTING
 	)
-	def script_toggleReportLineIndentation(self,gesture):
-		lineIndentationSpeech = config.conf["documentFormatting"]["reportLineIndentation"]
-		lineIndentationTones = config.conf["documentFormatting"]["reportLineIndentationWithTones"]
-		if not lineIndentationSpeech and not lineIndentationTones:
-			# Translators: A message reported when cycling through line indentation settings.
-			ui.message(_("Report line indentation with speech"))
-			lineIndentationSpeech = True
-		elif lineIndentationSpeech and not lineIndentationTones:
-			# Translators: A message reported when cycling through line indentation settings.
-			ui.message(_("Report line indentation with tones"))
-			lineIndentationSpeech = False
-			lineIndentationTones = True
-		elif not lineIndentationSpeech and lineIndentationTones:
-			# Translators: A message reported when cycling through line indentation settings.
-			ui.message(_("Report line indentation with speech and tones"))
-			lineIndentationSpeech = True
+	def script_toggleReportLineIndentation(self, gesture: inputCore.InputGesture):
+		ReportLineIndentation = config.configFlags.ReportLineIndentation
+		numVals = len(ReportLineIndentation)
+		state = ReportLineIndentation((config.conf["documentFormatting"]["reportLineIndentation"] + 1) % numVals)
+		config.conf["documentFormatting"]["reportLineIndentation"] = state.value
+		# Translators: A message reported when cycling through line indentation settings.
+		# {mode} will be replaced with the mode; i.e. Off, Speech, Tones or Both Speech and Tones.
+		ui.message(_("Report line indentation {mode}").format(mode=state.displayString))
+
+	@script(
+		# Translators: Input help mode message for toggle ignore blank lines for line indentation reporting command.
+		description=_("Toggles on and off the ignoring of blank lines for line indentation reporting"),
+		category=SCRCAT_DOCUMENTFORMATTING
+	)
+	def script_toggleignoreBlankLinesForReportLineIndentation(self, gesture: inputCore.InputGesture) -> None:
+		ignore = config.conf['documentFormatting']['ignoreBlankLinesForRLI']
+		config.conf['documentFormatting']['ignoreBlankLinesForRLI'] = not ignore
+		if ignore:
+			# Translators: The message announced when toggling off the ignore blank lines for line indentation
+			# reporting document formatting setting.
+			ui.message(_("Ignore blank lines for line indentation reporting off"))
 		else:
-			# Translators: A message reported when cycling through line indentation settings.
-			ui.message(_("Report line indentation off"))
-			lineIndentationSpeech = False
-			lineIndentationTones = False
-		config.conf["documentFormatting"]["reportLineIndentation"] = lineIndentationSpeech
-		config.conf["documentFormatting"]["reportLineIndentationWithTones"] = lineIndentationTones
+			# Translators: The message announced when toggling on the ignore blank lines for line indentation
+			# reporting document formatting setting.
+			ui.message(_("Ignore blank lines for line indentation reporting on"))
 
 	@script(
 		# Translators: Input help mode message for toggle report paragraph indentation command.
@@ -666,19 +686,17 @@ class GlobalCommands(ScriptableObject):
 
 	@script(
 		# Translators: Input help mode message for toggle report table row/column headers command.
-		description=_("Toggles on and off the reporting of table row and column headers"),
+		description=_("Cycle through the possible modes to report table row and column headers"),
 		category=SCRCAT_DOCUMENTFORMATTING
 	)
 	def script_toggleReportTableHeaders(self,gesture):
-		if config.conf["documentFormatting"]["reportTableHeaders"]:
-			# Translators: The message announced when toggling the report table row/column headers document formatting setting.
-			state = _("report table row and column headers off")
-			config.conf["documentFormatting"]["reportTableHeaders"]=False
-		else:
-			# Translators: The message announced when toggling the report table row/column headers document formatting setting.
-			state = _("report table row and column headers on")
-			config.conf["documentFormatting"]["reportTableHeaders"]=True
-		ui.message(state)
+		ReportTableHeaders = config.configFlags.ReportTableHeaders
+		numVals = len(ReportTableHeaders)
+		state = ReportTableHeaders((config.conf["documentFormatting"]["reportTableHeaders"] + 1) % numVals)
+		config.conf["documentFormatting"]["reportTableHeaders"] = state.value
+		# Translators: Reported when the user cycles through report table header modes.
+		# {mode} will be replaced with the mode; e.g. None, Rows and columns, Rows or Columns.
+		ui.message(_("Report table headers {mode}").format(mode=state.displayString))
 
 	@script(
 		# Translators: Input help mode message for toggle report table cell coordinates command.
@@ -701,26 +719,14 @@ class GlobalCommands(ScriptableObject):
 		description=_("Cycles through the cell border reporting settings"),
 		category=SCRCAT_DOCUMENTFORMATTING,
 	)
-	def script_toggleReportCellBorders(self, gesture):
-		if (
-			not config.conf["documentFormatting"]["reportBorderStyle"]
-			and not config.conf["documentFormatting"]["reportBorderColor"]
-		):
-			# Translators: A message reported when cycling through cell borders settings.
-			ui.message(_("Report styles of cell borders"))
-			config.conf["documentFormatting"]["reportBorderStyle"] = True
-		elif (
-			config.conf["documentFormatting"]["reportBorderStyle"]
-			and not config.conf["documentFormatting"]["reportBorderColor"]
-		):
-			# Translators: A message reported when cycling through cell borders settings.
-			ui.message(_("Report colors and styles of cell borders"))
-			config.conf["documentFormatting"]["reportBorderColor"] = True
-		else:
-			# Translators: A message reported when cycling through cell borders settings.
-			ui.message(_("Report cell borders off."))
-			config.conf["documentFormatting"]["reportBorderStyle"] = False
-			config.conf["documentFormatting"]["reportBorderColor"] = False
+	def script_toggleReportCellBorders(self, gesture: inputCore.InputGesture):
+		ReportCellBorders = config.configFlags.ReportCellBorders
+		numVals = len(ReportCellBorders)
+		state = ReportCellBorders((config.conf["documentFormatting"]["reportCellBorders"] + 1) % numVals)
+		config.conf["documentFormatting"]["reportCellBorders"] = state.value
+		# Translators: Reported when the user cycles through report cell border modes.
+		# {mode} will be replaced with the mode; e.g. Off, Styles and Colors and styles.
+		ui.message(_("Report cell borders {mode}").format(mode=state.displayString))
 
 	@script(
 		# Translators: Input help mode message for toggle report links command.
@@ -899,6 +905,32 @@ class GlobalCommands(ScriptableObject):
 		ui.message(state)
 
 	@script(
+		description=_(
+			# Translators: Input help mode message for cycle through automatic language switching mode command.
+			"Cycles through speech modes for automatic language switching: "
+			"off, language only and language and dialect."
+		),
+		category=SCRCAT_SPEECH,
+	)
+	def script_cycleSpeechAutomaticLanguageSwitching(self, gesture):
+		if config.conf["speech"]["autoLanguageSwitching"]:
+			if config.conf["speech"]["autoDialectSwitching"]:
+				# Translators: A message reported when executing the cycle automatic language switching mode command.
+				state = _("Automatic language switching off")
+				config.conf["speech"]["autoLanguageSwitching"] = False
+				config.conf["speech"]["autoDialectSwitching"] = False
+			else:
+				# Translators: A message reported when executing the cycle automatic language switching mode command.
+				state = _("Automatic language and dialect switching on")
+				config.conf["speech"]["autoDialectSwitching"] = True
+		else:
+			# Translators: A message reported when executing the cycle automatic language switching mode command.
+			state = _("Automatic language switching on")
+			config.conf["speech"]["autoLanguageSwitching"] = True
+			config.conf["speech"]["autoDialectSwitching"] = False
+		ui.message(state)
+
+	@script(
 		# Translators: Input help mode message for cycle speech symbol level command.
 		description=_("Cycles through speech symbol levels which determine what symbols are spoken"),
 		category=SCRCAT_SPEECH,
@@ -919,30 +951,66 @@ class GlobalCommands(ScriptableObject):
 		ui.message(_("Symbol level %s") % name)
 
 	@script(
+		# Translators: Input help mode message for toggle delayed character description command.
+		description=_("Toggles on and off delayed descriptions for characters on cursor movement"),
+		category=SCRCAT_SPEECH,
+	)
+	def script_toggleDelayedCharacterDescriptions(self, gesture: inputCore.InputGesture) -> None:
+		enabled: bool = not config.conf["speech"]["delayedCharacterDescriptions"]
+		config.conf["speech"]["delayedCharacterDescriptions"] = enabled
+		if enabled:
+			# Translators: The message announced when toggling the delayed character description setting.
+			state = _("delayed character descriptions on")
+		else:
+			# Translators: The message announced when toggling the delayed character description setting.
+			state = _("delayed character descriptions off")
+		ui.message(state)
+
+	@script(
 		# Translators: Input help mode message for move mouse to navigator object command.
 		description=_("Moves the mouse pointer to the current navigator object"),
 		category=SCRCAT_MOUSE,
 		gestures=("kb:NVDA+numpadDivide", "kb(laptop):NVDA+shift+m")
 	)
-	def script_moveMouseToNavigatorObject(self,gesture):
+	def script_moveMouseToNavigatorObject(self, gesture: inputCore.InputGesture):
+		reviewPosition = api.getReviewPosition()
 		try:
-			p=api.getReviewPosition().pointAtStart
+			reviewPositionStartPoint = reviewPosition.pointAtStart
 		except (NotImplementedError, LookupError):
-			p=None
-		if p:
-			x=p.x
-			y=p.y
+			reviewPositionStartPoint = None
+
+		if (
+			reviewPositionStartPoint
+			# This script is available on the lock screen via getSafeScripts, as such
+			# ensure the review position does not contain secure information
+			# before navigating to this object
+			and not objectBelowLockScreenAndWindowsIsLocked(reviewPosition.obj)
+		):
+			x = reviewPositionStartPoint.x
+			y = reviewPositionStartPoint.y
+
 		else:
+			navigatorObject = api.getNavigatorObject()
+			# This script is available on the lock screen via getSafeScripts, as such
+			# ensure the navigatorObject does not contain secure information
+			# before navigating to this object
+			if objectBelowLockScreenAndWindowsIsLocked(navigatorObject):
+				ui.message(gui.blockAction.Context.WINDOWS_LOCKED.translatedMessage)
+				return
+
 			try:
-				(left,top,width,height)=api.getNavigatorObject().location
+				(left, top, width, height) = navigatorObject.location
 			except:
 				# Translators: Reported when the object has no location for the mouse to move to it.
 				ui.message(_("Object has no location"))
 				return
-			x=left+(width//2)
-			y=top+(height//2)
+
+			x = left + (width // 2)
+			y = top + (height // 2)
+
 		winUser.setCursorPos(x,y)
 		mouseHandler.executeMouseMoveEvent(x,y)
+
 
 	@script(
 		# Translators: Input help mode message for move navigator object to mouse command.
@@ -950,12 +1018,19 @@ class GlobalCommands(ScriptableObject):
 		category=SCRCAT_MOUSE,
 		gestures=("kb:NVDA+numpadMultiply", "kb(laptop):NVDA+shift+n")
 	)
-	def script_moveNavigatorObjectToMouse(self,gesture):
+	def script_moveNavigatorObjectToMouse(self, gesture: inputCore.InputGesture):
 		# Translators: Reported when attempting to move the navigator object to the object under mouse pointer.
 		ui.message(_("Move navigator object to mouse"))
 		obj=api.getMouseObject()
-		api.setNavigatorObject(obj)
-		speech.speakObject(obj)
+		# This script is available on the lock screen via getSafeScripts,
+		# as such observe the setNavigatorObject result to ensure
+		# the navigatorObject does not contain secure information
+		# before announcing this object
+		if api.setNavigatorObject(obj):
+			speech.speakObject(obj)
+		else:
+			ui.message(gui.blockAction.Context.WINDOWS_LOCKED.translatedMessage)
+			return
 
 	@script(
 		description=_(
@@ -972,7 +1047,7 @@ class GlobalCommands(ScriptableObject):
 			ui.reviewMessage(label)
 			pos=api.getReviewPosition().copy()
 			pos.expand(textInfos.UNIT_LINE)
-			braille.handler.setTether(braille.handler.TETHER_REVIEW, auto=True)
+			braille.handler.setTether(TetherTo.REVIEW.value, auto=True)
 			speech.speakTextInfo(pos)
 		else:
 			# Translators: reported when there are no other available review modes for this object 
@@ -993,7 +1068,7 @@ class GlobalCommands(ScriptableObject):
 			ui.reviewMessage(label)
 			pos=api.getReviewPosition().copy()
 			pos.expand(textInfos.UNIT_LINE)
-			braille.handler.setTether(braille.handler.TETHER_REVIEW, auto=True)
+			braille.handler.setTether(TetherTo.REVIEW.value, auto=True)
 			speech.speakTextInfo(pos)
 		else:
 			# Translators: reported when there are no other available review modes for this object 
@@ -1025,13 +1100,21 @@ class GlobalCommands(ScriptableObject):
 		category=SCRCAT_OBJECTNAVIGATION,
 		gestures=("kb:NVDA+numpad5", "kb(laptop):NVDA+shift+o")
 	)
-	def script_navigatorObject_current(self,gesture):
+	def script_navigatorObject_current(self, gesture: inputCore.InputGesture):
 		curObject=api.getNavigatorObject()
-		if not isinstance(curObject,NVDAObject):
+		if not isinstance(curObject, NVDAObject):
 			# Translators: Reported when the user tries to perform a command related to the navigator object
 			# but there is no current navigator object.
 			ui.reviewMessage(_("No navigator object"))
 			return
+
+		if objectBelowLockScreenAndWindowsIsLocked(curObject):
+			# This script is available on the lock screen via getSafeScripts, as such
+			# ensure the navigatorObject does not contain secure information
+			# before announcing this object
+			ui.reviewMessage(gui.blockAction.Context.WINDOWS_LOCKED.translatedMessage)
+			return
+
 		if scriptHandler.getLastScriptRepeatCount()>=1:
 			if curObject.TextInfo!=NVDAObjectTextInfo:
 				textList=[]
@@ -1160,11 +1243,20 @@ class GlobalCommands(ScriptableObject):
 		category=SCRCAT_OBJECTNAVIGATION,
 		gestures=("kb:NVDA+numpadMinus", "kb(laptop):NVDA+backspace")
 	)
-	def script_navigatorObject_toFocus(self,gesture):
+	def script_navigatorObject_toFocus(self, gesture: inputCore.InputGesture):
 		tIAtCaret = self._getTIAtCaret(True)
 		focusedObj = api.getFocusObject()
-		api.setNavigatorObject(focusedObj)
-		api.setReviewPosition(tIAtCaret)
+		if (
+			# This script is available on the lock screen via getSafeScripts,
+			# as such observe the setNavigatorObject and setReviewPosition
+			# result to ensure the navigator object does not contain secure information
+			# before announcing this object
+			not api.setNavigatorObject(focusedObj)
+			or not api.setReviewPosition(tIAtCaret)
+		):
+			ui.message(gui.blockAction.Context.WINDOWS_LOCKED.translatedMessage)
+			return
+
 		# Translators: Reported when attempting to move the navigator object to focus.
 		speech.speakMessage(_("Move to focus"))
 		speech.speakObject(api.getNavigatorObject(), reason=controlTypes.OutputReason.FOCUS)
@@ -1178,19 +1270,34 @@ class GlobalCommands(ScriptableObject):
 		category=SCRCAT_OBJECTNAVIGATION,
 		gestures=("kb:NVDA+shift+numpadMinus", "kb(laptop):NVDA+shift+backspace")
 	)
-	def script_navigatorObject_moveFocus(self,gesture):
+	def script_navigatorObject_moveFocus(self, gesture: inputCore.InputGesture):
 		obj=api.getNavigatorObject()
-		if not isinstance(obj,NVDAObject):
+		if not isinstance(obj, NVDAObject):
 			# Translators: Reported when:
 			# 1. There is no focusable object e.g. cannot use tab and shift tab to move to controls.
 			# 2. Trying to move focus to navigator object but there is no focus.
 			ui.message(_("No focus"))
-		if scriptHandler.getLastScriptRepeatCount()==0:
+
+		if scriptHandler.getLastScriptRepeatCount() == 0:
 			# Translators: Reported when attempting to move focus to navigator object.
 			ui.message(_("Move focus"))
-			obj.setFocus()
+			# This script is available on the lock screen via getSafeScripts, as such
+			# ensure the navigatorObject does not contain secure information
+			# before setting focus to this object
+			if objectBelowLockScreenAndWindowsIsLocked(obj):
+				ui.message(gui.blockAction.Context.WINDOWS_LOCKED.translatedMessage)
+				return
+			else:
+				obj.setFocus()
+
 		else:
 			review=api.getReviewPosition()
+			# This script is available on the lock screen via getSafeScripts, as such
+			# ensure the review object does not contain secure information
+			# before speaking this object
+			if objectBelowLockScreenAndWindowsIsLocked(review.obj):
+				ui.reviewMessage(gui.blockAction.Context.WINDOWS_LOCKED.translatedMessage)
+				return
 			try:
 				review.updateCaret()
 			except NotImplementedError:
@@ -1207,7 +1314,7 @@ class GlobalCommands(ScriptableObject):
 		category=SCRCAT_OBJECTNAVIGATION,
 		gestures=("kb:NVDA+numpad8", "kb(laptop):NVDA+shift+upArrow", "ts(object):flickup")
 	)
-	def script_navigatorObject_parent(self,gesture):
+	def script_navigatorObject_parent(self, gesture: inputCore.InputGesture):
 		curObject=api.getNavigatorObject()
 		if not isinstance(curObject,NVDAObject):
 			# Translators: Reported when the user tries to perform a command related to the navigator object
@@ -1216,12 +1323,21 @@ class GlobalCommands(ScriptableObject):
 			return
 		simpleReviewMode=config.conf["reviewCursor"]["simpleReviewMode"]
 		curObject=curObject.simpleParent if simpleReviewMode else curObject.parent
-		if curObject is not None:
-			api.setNavigatorObject(curObject)
-			speech.speakObject(curObject, reason=controlTypes.OutputReason.FOCUS)
-		else:
+
+		if curObject is None:
 			# Translators: Reported when there is no containing (parent) object such as when focused on desktop.
 			ui.reviewMessage(_("No containing object"))
+			return
+
+		# This script is available on the lock screen via getSafeScripts,
+		# as such observe the setNavigatorObject result to ensure
+		# the navigatorObject does not contain secure information
+		# before announcing this object
+		if api.setNavigatorObject(curObject):
+			speech.speakObject(curObject, reason=controlTypes.OutputReason.FOCUS)
+		else:
+			ui.reviewMessage(gui.blockAction.Context.WINDOWS_LOCKED.translatedMessage)
+			return
 
 	@script(
 		# Translators: Input help mode message for move to next object command.
@@ -1229,7 +1345,7 @@ class GlobalCommands(ScriptableObject):
 		category=SCRCAT_OBJECTNAVIGATION,
 		gestures=("kb:NVDA+numpad6", "kb(laptop):NVDA+shift+rightArrow", "ts(object):2finger_flickright")
 	)
-	def script_navigatorObject_next(self,gesture):
+	def script_navigatorObject_next(self, gesture: inputCore.InputGesture):
 		curObject=api.getNavigatorObject()
 		if not isinstance(curObject,NVDAObject):
 			# Translators: Reported when the user tries to perform a command related to the navigator object
@@ -1238,12 +1354,20 @@ class GlobalCommands(ScriptableObject):
 			return
 		simpleReviewMode=config.conf["reviewCursor"]["simpleReviewMode"]
 		curObject=curObject.simpleNext if simpleReviewMode else curObject.next
-		if curObject is not None:
-			api.setNavigatorObject(curObject)
-			speech.speakObject(curObject, reason=controlTypes.OutputReason.FOCUS)
-		else:
+		if curObject is None:
 			# Translators: Reported when there is no next object (current object is the last object).
 			ui.reviewMessage(_("No next"))
+			return
+
+		# This script is available on the lock screen via getSafeScripts,
+		# as such observe the setNavigatorObject result to ensure
+		# the navigatorObject does not contain secure information
+		# before announcing this object
+		if api.setNavigatorObject(curObject):
+			speech.speakObject(curObject, reason=controlTypes.OutputReason.FOCUS)
+		else:
+			ui.reviewMessage(gui.blockAction.Context.WINDOWS_LOCKED.translatedMessage)
+			return
 
 	@script(
 		# Translators: Input help mode message for move to previous object command.
@@ -1251,21 +1375,28 @@ class GlobalCommands(ScriptableObject):
 		category=SCRCAT_OBJECTNAVIGATION,
 		gestures=("kb:NVDA+numpad4", "kb(laptop):NVDA+shift+leftArrow", "ts(object):2finger_flickleft")
 	)
-	def script_navigatorObject_previous(self,gesture):
+	def script_navigatorObject_previous(self, gesture: inputCore.InputGesture):
 		curObject=api.getNavigatorObject()
 		if not isinstance(curObject,NVDAObject):
-			# Translators: Reported when the user tries to perform a command related to the navigator object
 			# but there is no current navigator object.
 			ui.reviewMessage(_("No navigator object"))
 			return
 		simpleReviewMode=config.conf["reviewCursor"]["simpleReviewMode"]
 		curObject=curObject.simplePrevious if simpleReviewMode else curObject.previous
-		if curObject is not None:
-			api.setNavigatorObject(curObject)
-			speech.speakObject(curObject, reason=controlTypes.OutputReason.FOCUS)
-		else:
+		if curObject is None:
 			# Translators: Reported when there is no previous object (current object is the first object).
 			ui.reviewMessage(_("No previous"))
+			return
+
+		# This script is available on the lock screen via getSafeScripts,
+		# as such observe the setNavigatorObject result to ensure
+		# the navigatorObject does not contain secure information
+		# before announcing this object
+		if api.setNavigatorObject(curObject):
+			speech.speakObject(curObject, reason=controlTypes.OutputReason.FOCUS)
+		else:
+			ui.reviewMessage(gui.blockAction.Context.WINDOWS_LOCKED.translatedMessage)
+			return
 
 	@script(
 		# Translators: Input help mode message for move to first child object command.
@@ -1273,7 +1404,7 @@ class GlobalCommands(ScriptableObject):
 		category=SCRCAT_OBJECTNAVIGATION,
 		gestures=("kb:NVDA+numpad2", "kb(laptop):NVDA+shift+downArrow", "ts(object):flickdown")
 	)
-	def script_navigatorObject_firstChild(self,gesture):
+	def script_navigatorObject_firstChild(self, gesture: inputCore.InputGesture):
 		curObject=api.getNavigatorObject()
 		if not isinstance(curObject,NVDAObject):
 			# Translators: Reported when the user tries to perform a command related to the navigator object
@@ -1282,12 +1413,21 @@ class GlobalCommands(ScriptableObject):
 			return
 		simpleReviewMode=config.conf["reviewCursor"]["simpleReviewMode"]
 		curObject=curObject.simpleFirstChild if simpleReviewMode else curObject.firstChild
-		if curObject is not None:
-			api.setNavigatorObject(curObject)
-			speech.speakObject(curObject, reason=controlTypes.OutputReason.FOCUS)
-		else:
+
+		if curObject is None:
 			# Translators: Reported when there is no contained (first child) object such as inside a document.
 			ui.reviewMessage(_("No objects inside"))
+			return
+
+		# This script is available on the lock screen via getSafeScripts,
+		# as such observe the setNavigatorObject result to ensure
+		# the navigatorObject does not contain secure information
+		# before announcing this object
+		if api.setNavigatorObject(curObject):
+			speech.speakObject(curObject, reason=controlTypes.OutputReason.FOCUS)
+		else:
+			ui.reviewMessage(gui.blockAction.Context.WINDOWS_LOCKED.translatedMessage)
+			return
 
 	@script(
 		description=_(
@@ -1298,20 +1438,32 @@ class GlobalCommands(ScriptableObject):
 		category=SCRCAT_OBJECTNAVIGATION,
 		gestures=("kb:NVDA+numpadEnter", "kb(laptop):NVDA+enter", "ts:double_tap")
 	)
-	def script_review_activate(self,gesture):
+	def script_review_activate(self, gesture: inputCore.InputGesture):
 		# Translators: a message reported when the action at the position of the review cursor or navigator object is performed.
 		actionName=_("Activate")
 		pos=api.getReviewPosition()
+		# This script is available on the lock screen via getSafeScripts, as such
+		# ensure the review position does not contain secure information
+		# before activating this object
+		if objectBelowLockScreenAndWindowsIsLocked(pos.obj):
+			ui.message(gui.blockAction.Context.WINDOWS_LOCKED.translatedMessage)
+			return
 		try:
 			pos.activate()
-			if isinstance(gesture,touchHandler.TouchInputGesture):
+			if isinstance(gesture, touchHandler.TouchInputGesture):
 				touchHandler.handler.notifyInteraction(pos.NVDAObjectAtStart)
 			ui.message(actionName)
 			return
 		except NotImplementedError:
 			pass
 		obj=api.getNavigatorObject()
-		while obj:
+		while (
+			obj
+			# This script is available on the lock screen via getSafeScripts, as such
+			# ensure the review position does not contain secure information
+			# before activating this object
+			and not objectBelowLockScreenAndWindowsIsLocked(obj)
+		):
 			realActionName=actionName
 			try:
 				realActionName=obj.getActionName()
@@ -1335,11 +1487,22 @@ class GlobalCommands(ScriptableObject):
 		category=SCRCAT_TEXTREVIEW,
 		gestures=("kb:shift+numpad7", "kb(laptop):NVDA+control+home")
 	)
-	def script_review_top(self,gesture):
+	def script_review_top(self, gesture: inputCore.InputGesture):
 		info=api.getReviewPosition().obj.makeTextInfo(textInfos.POSITION_FIRST)
-		api.setReviewPosition(info)
-		info.expand(textInfos.UNIT_LINE)
-		speech.speakTextInfo(info, unit=textInfos.UNIT_LINE, reason=controlTypes.OutputReason.CARET)
+		# This script is available on the lock screen via getSafeScripts,
+		# as such observe the setReviewPosition result to ensure
+		# the review position does not contain secure information
+		# before announcing this object
+		if api.setReviewPosition(info):
+			info.expand(textInfos.UNIT_LINE)
+			speech.speakTextInfo(
+				info,
+				unit=textInfos.UNIT_LINE,
+				reason=controlTypes.OutputReason.CARET
+			)
+		else:
+			ui.reviewMessage(gui.blockAction.Context.WINDOWS_LOCKED.translatedMessage)
+			return
 
 	@script(
 		# Translators: Input help mode message for move review cursor to previous line command.
@@ -1348,7 +1511,7 @@ class GlobalCommands(ScriptableObject):
 		category=SCRCAT_TEXTREVIEW,
 		gestures=("kb:numpad7", "kb(laptop):NVDA+upArrow", "ts(text):flickUp")
 	)
-	def script_review_previousLine(self,gesture):
+	def script_review_previousLine(self, gesture: inputCore.InputGesture):
 		info=api.getReviewPosition().copy()
 		info.expand(textInfos.UNIT_LINE)
 		info.collapse()
@@ -1358,8 +1521,20 @@ class GlobalCommands(ScriptableObject):
 			ui.reviewMessage(_("Top"))
 		else:
 			api.setReviewPosition(info)
-		info.expand(textInfos.UNIT_LINE)
-		speech.speakTextInfo(info, unit=textInfos.UNIT_LINE, reason=controlTypes.OutputReason.CARET)
+
+		# This script is available on the lock screen via getSafeScripts, as such
+		# ensure the review position does not contain secure information
+		# before announcing this object
+		if objectBelowLockScreenAndWindowsIsLocked(info.obj):
+			ui.reviewMessage(gui.blockAction.Context.WINDOWS_LOCKED.translatedMessage)
+			return
+		else:
+			info.expand(textInfos.UNIT_LINE)
+			speech.speakTextInfo(
+				info,
+				unit=textInfos.UNIT_LINE,
+				reason=controlTypes.OutputReason.CARET
+			)
 
 	@script(
 		description=_(
@@ -1371,11 +1546,17 @@ class GlobalCommands(ScriptableObject):
 		category=SCRCAT_TEXTREVIEW,
 		gestures=("kb:numpad8", "kb(laptop):NVDA+shift+.")
 	)
-	def script_review_currentLine(self,gesture):
+	def script_review_currentLine(self, gesture: inputCore.InputGesture):
 		info=api.getReviewPosition().copy()
+		# This script is available on the lock screen via getSafeScripts, as such
+		# ensure the review position does not contain secure information
+		# before announcing this object
+		if objectBelowLockScreenAndWindowsIsLocked(info.obj):
+			ui.reviewMessage(gui.blockAction.Context.WINDOWS_LOCKED.translatedMessage)
+			return
 		info.expand(textInfos.UNIT_LINE)
 		# Explicitly tether here
-		braille.handler.setTether(braille.handler.TETHER_REVIEW, auto=True)
+		braille.handler.handleReviewMove(shouldAutoTether=True)
 		scriptCount=scriptHandler.getLastScriptRepeatCount()
 		if scriptCount==0:
 			speech.speakTextInfo(info, unit=textInfos.UNIT_LINE, reason=controlTypes.OutputReason.CARET)
@@ -1389,7 +1570,7 @@ class GlobalCommands(ScriptableObject):
 		category=SCRCAT_TEXTREVIEW,
 		gestures=("kb:numpad9", "kb(laptop):NVDA+downArrow", "ts(text):flickDown")
 	)
-	def script_review_nextLine(self, gesture):
+	def script_review_nextLine(self, gesture: inputCore.InputGesture):
 		origInfo = api.getReviewPosition().copy()
 		origInfo.collapse()
 		info = origInfo.copy()
@@ -1405,7 +1586,88 @@ class GlobalCommands(ScriptableObject):
 			ui.reviewMessage(_("Bottom"))
 		else:
 			api.setReviewPosition(info)
-		speech.speakTextInfo(newLine, unit=textInfos.UNIT_LINE, reason=controlTypes.OutputReason.CARET)
+
+		# This script is available on the lock screen via getSafeScripts, as such
+		# ensure the review position does not contain secure information
+		# before announcing this object
+		if objectBelowLockScreenAndWindowsIsLocked(newLine.obj):
+			ui.reviewMessage(gui.blockAction.Context.WINDOWS_LOCKED.translatedMessage)
+			return
+		else:
+			speech.speakTextInfo(
+				newLine,
+				unit=textInfos.UNIT_LINE,
+				reason=controlTypes.OutputReason.CARET
+			)
+
+	@script(
+		# Translators: Input help mode message for move review cursor to previous page command.
+		description=_("Moves the review cursor to the previous page of the current navigator object and speaks it"),
+		resumeSayAllMode=sayAll.CURSOR.REVIEW,
+		category=SCRCAT_TEXTREVIEW,
+		gestures=("kb:NVDA+pageUp", "kb(laptop):NVDA+shift+pageUp")
+	)
+	def script_review_previousPage(self, gesture: inputCore.InputGesture) -> None:
+		info = api.getReviewPosition().copy()
+		try:
+			info.expand(textInfos.UNIT_PAGE)
+			info.collapse()
+			res = info.move(textInfos.UNIT_PAGE, -1)
+		except (ValueError, NotImplementedError):
+			# Translators: a message reported when movement by page is unsupported
+			ui.reviewMessage(_("Movement by page not supported"))
+			return
+		if res == 0:
+			# Translators: a message reported when review cursor is at the top line of the current navigator object.
+			ui.reviewMessage(_("Top"))
+		else:
+			api.setReviewPosition(info)
+
+		# Ensure the review position does not contain secure information
+		# before announcing this object
+		if objectBelowLockScreenAndWindowsIsLocked(info.obj):
+			ui.reviewMessage(gui.blockAction.Context.WINDOWS_LOCKED.translatedMessage)
+			return
+		else:
+			info.expand(textInfos.UNIT_PAGE)
+			speech.speakTextInfo(info, unit=textInfos.UNIT_PAGE, reason=controlTypes.OutputReason.CARET)
+
+	@script(
+		# Translators: Input help mode message for move review cursor to next page command.
+		description=_("Moves the review cursor to the next page of the current navigator object and speaks it"),
+		resumeSayAllMode=sayAll.CURSOR.REVIEW,
+		category=SCRCAT_TEXTREVIEW,
+		gestures=("kb:NVDA+pageDown", "kb(laptop):NVDA+shift+pageDown")
+	)
+	def script_review_nextPage(self, gesture: inputCore.InputGesture) -> None:
+		origInfo = api.getReviewPosition().copy()
+		origInfo.collapse()
+		info = origInfo.copy()
+		try:
+			res = info.move(textInfos.UNIT_PAGE, 1)
+			newPage = info.copy()
+			newPage.expand(textInfos.UNIT_PAGE)
+		except (ValueError, NotImplementedError):
+			# Translators: a message reported when movement by page is unsupported
+			ui.reviewMessage(_("Movement by page not supported"))
+			return
+		# #12808: Some implementations of move forward may succeed one more time than expected,
+		# landing on the exclusive end of the document.
+		# Therefore, verify that expanding after the move does result in being on a new page,
+		# i.e. the new page starts after the original review cursor position.
+		if res == 0 or newPage.start <= origInfo.start:
+			# Translators: a message reported when review cursor is at the bottom line of the current navigator object.
+			ui.reviewMessage(_("Bottom"))
+		else:
+			api.setReviewPosition(info)
+
+		# Ensure the review position does not contain secure information
+		# before announcing this object
+		if objectBelowLockScreenAndWindowsIsLocked(info.obj):
+			ui.reviewMessage(gui.blockAction.Context.WINDOWS_LOCKED.translatedMessage)
+			return
+		else:
+			speech.speakTextInfo(newPage, unit=textInfos.UNIT_PAGE, reason=controlTypes.OutputReason.CARET)
 
 	@script(
 		# Translators: Input help mode message for move review cursor to bottom line command.
@@ -1413,11 +1675,22 @@ class GlobalCommands(ScriptableObject):
 		category=SCRCAT_TEXTREVIEW,
 		gestures=("kb:shift+numpad9", "kb(laptop):NVDA+control+end")
 	)
-	def script_review_bottom(self,gesture):
+	def script_review_bottom(self, gesture: inputCore.InputGesture):
 		info=api.getReviewPosition().obj.makeTextInfo(textInfos.POSITION_LAST)
-		api.setReviewPosition(info)
-		info.expand(textInfos.UNIT_LINE)
-		speech.speakTextInfo(info, unit=textInfos.UNIT_LINE, reason=controlTypes.OutputReason.CARET)
+		# This script is available on the lock screen via getSafeScripts,
+		# as such observe the setReviewPosition result to ensure
+		# the review position does not contain secure information
+		# before announcing this object
+		if api.setReviewPosition(info):
+			info.expand(textInfos.UNIT_LINE)
+			speech.speakTextInfo(
+				info,
+				unit=textInfos.UNIT_LINE,
+				reason=controlTypes.OutputReason.CARET
+			)
+		else:
+			ui.reviewMessage(gui.blockAction.Context.WINDOWS_LOCKED.translatedMessage)
+			return
 
 	@script(
 		# Translators: Input help mode message for move review cursor to previous word command.
@@ -1425,7 +1698,7 @@ class GlobalCommands(ScriptableObject):
 		category=SCRCAT_TEXTREVIEW,
 		gestures=("kb:numpad4", "kb(laptop):NVDA+control+leftArrow", "ts(text):2finger_flickLeft")
 	)
-	def script_review_previousWord(self,gesture):
+	def script_review_previousWord(self, gesture: inputCore.InputGesture):
 		info=api.getReviewPosition().copy()
 		info.expand(textInfos.UNIT_WORD)
 		info.collapse()
@@ -1435,8 +1708,20 @@ class GlobalCommands(ScriptableObject):
 			ui.reviewMessage(_("Top"))
 		else:
 			api.setReviewPosition(info)
-		info.expand(textInfos.UNIT_WORD)
-		speech.speakTextInfo(info, reason=controlTypes.OutputReason.CARET, unit=textInfos.UNIT_WORD)
+
+		# This script is available on the lock screen via getSafeScripts, as such
+		# ensure the review position does not contain secure information
+		# before announcing this object
+		if objectBelowLockScreenAndWindowsIsLocked(info.obj):
+			ui.reviewMessage(gui.blockAction.Context.WINDOWS_LOCKED.translatedMessage)
+			return
+		else:
+			info.expand(textInfos.UNIT_WORD)
+			speech.speakTextInfo(
+				info,
+				reason=controlTypes.OutputReason.CARET,
+				unit=textInfos.UNIT_WORD
+			)
 
 	@script(
 		description=_(
@@ -1448,11 +1733,18 @@ class GlobalCommands(ScriptableObject):
 		category=SCRCAT_TEXTREVIEW,
 		gestures=("kb:numpad5", "kb(laptop):NVDA+control+.", "ts(text):hoverUp")
 	)
-	def script_review_currentWord(self,gesture):
+	def script_review_currentWord(self, gesture: inputCore.InputGesture):
 		info=api.getReviewPosition().copy()
+		# This script is available on the lock screen via getSafeScripts, as such
+		# ensure the review position does not contain secure information
+		# before announcing this object
+		if objectBelowLockScreenAndWindowsIsLocked(info.obj):
+			ui.reviewMessage(gui.blockAction.Context.WINDOWS_LOCKED.translatedMessage)
+			return
+
 		info.expand(textInfos.UNIT_WORD)
 		# Explicitly tether here
-		braille.handler.setTether(braille.handler.TETHER_REVIEW, auto=True)
+		braille.handler.handleReviewMove(shouldAutoTether=True)
 		scriptCount=scriptHandler.getLastScriptRepeatCount()
 		if scriptCount==0:
 			speech.speakTextInfo(info, reason=controlTypes.OutputReason.CARET, unit=textInfos.UNIT_WORD)
@@ -1465,7 +1757,7 @@ class GlobalCommands(ScriptableObject):
 		category=SCRCAT_TEXTREVIEW,
 		gestures=("kb:numpad6", "kb(laptop):NVDA+control+rightArrow", "ts(text):2finger_flickRight")
 	)
-	def script_review_nextWord(self, gesture):
+	def script_review_nextWord(self, gesture: inputCore.InputGesture):
 		origInfo = api.getReviewPosition().copy()
 		origInfo.collapse()
 		info = origInfo.copy()
@@ -1481,7 +1773,19 @@ class GlobalCommands(ScriptableObject):
 			ui.reviewMessage(_("Bottom"))
 		else:
 			api.setReviewPosition(info)
-		speech.speakTextInfo(newWord, unit=textInfos.UNIT_WORD, reason=controlTypes.OutputReason.CARET)
+
+		# This script is available on the lock screen via getSafeScripts, as such
+		# ensure the review position does not contain secure information
+		# before announcing this object
+		if objectBelowLockScreenAndWindowsIsLocked(newWord.obj):
+			ui.reviewMessage(gui.blockAction.Context.WINDOWS_LOCKED.translatedMessage)
+			return
+		else:
+			speech.speakTextInfo(
+				newWord,
+				unit=textInfos.UNIT_WORD,
+				reason=controlTypes.OutputReason.CARET
+			)
 
 	@script(
 		description=_(
@@ -1492,13 +1796,25 @@ class GlobalCommands(ScriptableObject):
 		category=SCRCAT_TEXTREVIEW,
 		gestures=("kb:shift+numpad1", "kb(laptop):NVDA+home")
 	)
-	def script_review_startOfLine(self,gesture):
+	def script_review_startOfLine(self, gesture: inputCore.InputGesture):
 		info=api.getReviewPosition().copy()
 		info.expand(textInfos.UNIT_LINE)
 		info.collapse()
-		api.setReviewPosition(info)
-		info.expand(textInfos.UNIT_CHARACTER)
-		speech.speakTextInfo(info, unit=textInfos.UNIT_CHARACTER, reason=controlTypes.OutputReason.CARET)
+
+		# This script is available on the lock screen via getSafeScripts,
+		# as such observe the setReviewPosition result to ensure
+		# the review position does not contain secure information
+		# before announcing this object
+		if api.setReviewPosition(info):
+			info.expand(textInfos.UNIT_CHARACTER)
+			speech.speakTextInfo(
+				info,
+				unit=textInfos.UNIT_CHARACTER,
+				reason=controlTypes.OutputReason.CARET
+			)
+		else:
+			ui.reviewMessage(gui.blockAction.Context.WINDOWS_LOCKED.translatedMessage)
+			return
 
 	@script(
 		description=_(
@@ -1508,7 +1824,7 @@ class GlobalCommands(ScriptableObject):
 		category=SCRCAT_TEXTREVIEW,
 		gestures=("kb:numpad1", "kb(laptop):NVDA+leftArrow", "ts(text):flickLeft")
 	)
-	def script_review_previousCharacter(self,gesture):
+	def script_review_previousCharacter(self, gesture: inputCore.InputGesture):
 		lineInfo=api.getReviewPosition().copy()
 		lineInfo.expand(textInfos.UNIT_LINE)
 		charInfo=api.getReviewPosition().copy()
@@ -1518,13 +1834,24 @@ class GlobalCommands(ScriptableObject):
 		if res==0 or charInfo.compareEndPoints(lineInfo,"startToStart")<0:
 			# Translators: a message reported when review cursor is at the leftmost character of the current navigator object's text.
 			ui.reviewMessage(_("Left"))
-			reviewInfo=api.getReviewPosition().copy()
-			reviewInfo.expand(textInfos.UNIT_CHARACTER)
-			speech.speakTextInfo(reviewInfo, unit=textInfos.UNIT_CHARACTER, reason=controlTypes.OutputReason.CARET)
+			reviewInfo = api.getReviewPosition().copy()
 		else:
-			api.setReviewPosition(charInfo)
-			charInfo.expand(textInfos.UNIT_CHARACTER)
-			speech.speakTextInfo(charInfo, unit=textInfos.UNIT_CHARACTER, reason=controlTypes.OutputReason.CARET)
+			reviewInfo = charInfo
+			api.setReviewPosition(reviewInfo)
+
+		# This script is available on the lock screen via getSafeScripts, as such
+		# ensure the review position does not contain secure information
+		# before announcing this object
+		if objectBelowLockScreenAndWindowsIsLocked(reviewInfo.obj):
+			ui.reviewMessage(gui.blockAction.Context.WINDOWS_LOCKED.translatedMessage)
+			return
+		else:
+			reviewInfo.expand(textInfos.UNIT_CHARACTER)
+			speech.speakTextInfo(
+				reviewInfo,
+				unit=textInfos.UNIT_CHARACTER,
+				reason=controlTypes.OutputReason.CARET
+			)
 
 	@script(
 		description=_(
@@ -1536,11 +1863,18 @@ class GlobalCommands(ScriptableObject):
 		category=SCRCAT_TEXTREVIEW,
 		gestures=("kb:numpad2", "kb(laptop):NVDA+.")
 	)
-	def script_review_currentCharacter(self,gesture):
+	def script_review_currentCharacter(self, gesture: inputCore.InputGesture):
 		info=api.getReviewPosition().copy()
+		# This script is available on the lock screen via getSafeScripts, as such
+		# ensure the review position does not contain secure information
+		# before announcing this object
+		if objectBelowLockScreenAndWindowsIsLocked(info.obj):
+			ui.reviewMessage(gui.blockAction.Context.WINDOWS_LOCKED.translatedMessage)
+			return
+
 		info.expand(textInfos.UNIT_CHARACTER)
 		# Explicitly tether here
-		braille.handler.setTether(braille.handler.TETHER_REVIEW, auto=True)
+		braille.handler.handleReviewMove(shouldAutoTether=True)
 		scriptCount=scriptHandler.getLastScriptRepeatCount()
 		if scriptCount==0:
 			speech.speakTextInfo(info, unit=textInfos.UNIT_CHARACTER, reason=controlTypes.OutputReason.CARET)
@@ -1554,6 +1888,7 @@ class GlobalCommands(ScriptableObject):
 			if c is not None:
 				speech.speakMessage("%d," % c)
 				speech.speakSpelling(hex(c))
+				braille.handler.message(f"{c}, {hex(c)}")
 			else:
 				log.debugWarning("Couldn't calculate ordinal for character %r" % info.text)
 				speech.speakTextInfo(info, unit=textInfos.UNIT_CHARACTER, reason=controlTypes.OutputReason.CARET)
@@ -1566,7 +1901,7 @@ class GlobalCommands(ScriptableObject):
 		category=SCRCAT_TEXTREVIEW,
 		gestures=("kb:numpad3", "kb(laptop):NVDA+rightArrow", "ts(text):flickRight")
 	)
-	def script_review_nextCharacter(self,gesture):
+	def script_review_nextCharacter(self, gesture: inputCore.InputGesture):
 		lineInfo=api.getReviewPosition().copy()
 		lineInfo.expand(textInfos.UNIT_LINE)
 		charInfo=api.getReviewPosition().copy()
@@ -1576,13 +1911,24 @@ class GlobalCommands(ScriptableObject):
 		if res==0 or charInfo.compareEndPoints(lineInfo,"endToEnd")>=0:
 			# Translators: a message reported when review cursor is at the rightmost character of the current navigator object's text.
 			ui.reviewMessage(_("Right"))
-			reviewInfo=api.getReviewPosition().copy()
-			reviewInfo.expand(textInfos.UNIT_CHARACTER)
-			speech.speakTextInfo(reviewInfo, unit=textInfos.UNIT_CHARACTER, reason=controlTypes.OutputReason.CARET)
+			reviewInfo = api.getReviewPosition().copy()
 		else:
-			api.setReviewPosition(charInfo)
-			charInfo.expand(textInfos.UNIT_CHARACTER)
-			speech.speakTextInfo(charInfo, unit=textInfos.UNIT_CHARACTER, reason=controlTypes.OutputReason.CARET)
+			reviewInfo = charInfo
+			api.setReviewPosition(reviewInfo)
+
+		# This script is available on the lock screen via getSafeScripts, as such
+		# ensure the review position does not contain secure information
+		# before announcing this object
+		if objectBelowLockScreenAndWindowsIsLocked(reviewInfo.obj):
+			ui.reviewMessage(gui.blockAction.Context.WINDOWS_LOCKED.translatedMessage)
+			return
+		else:
+			reviewInfo.expand(textInfos.UNIT_CHARACTER)
+			speech.speakTextInfo(
+				reviewInfo,
+				unit=textInfos.UNIT_CHARACTER,
+				reason=controlTypes.OutputReason.CARET
+			)
 
 	@script(
 		description=_(
@@ -1593,14 +1939,25 @@ class GlobalCommands(ScriptableObject):
 		category=SCRCAT_TEXTREVIEW,
 		gestures=("kb:shift+numpad3", "kb(laptop):NVDA+end")
 	)
-	def script_review_endOfLine(self,gesture):
+	def script_review_endOfLine(self, gesture: inputCore.InputGesture):
 		info=api.getReviewPosition().copy()
 		info.expand(textInfos.UNIT_LINE)
 		info.collapse(end=True)
 		info.move(textInfos.UNIT_CHARACTER,-1)
-		api.setReviewPosition(info)
-		info.expand(textInfos.UNIT_CHARACTER)
-		speech.speakTextInfo(info, unit=textInfos.UNIT_CHARACTER, reason=controlTypes.OutputReason.CARET)
+
+		# This script is available on the lock screen via getSafeScripts, as such
+		# ensure the review position does not contain secure information
+		# before announcing this object
+		if api.setReviewPosition(info):
+			info.expand(textInfos.UNIT_CHARACTER)
+			speech.speakTextInfo(
+				info,
+				unit=textInfos.UNIT_CHARACTER,
+				reason=controlTypes.OutputReason.CARET,
+			)
+		else:
+			ui.reviewMessage(gui.blockAction.Context.WINDOWS_LOCKED.translatedMessage)
+			return
 
 	def _getCurrentLanguageForTextInfo(self, info):
 		curLanguage = None
@@ -1763,6 +2120,7 @@ class GlobalCommands(ScriptableObject):
 		description=_("Shows the NVDA menu"),
 		gestures=("kb:NVDA+n", "ts:2finger_double_tap")
 	)
+	@gui.blockAction.when(gui.blockAction.Context.MODAL_DIALOG_OPEN)
 	def script_showGui(self,gesture):
 		gui.showGui()
 
@@ -1775,7 +2133,9 @@ class GlobalCommands(ScriptableObject):
 		category=SCRCAT_TEXTREVIEW,
 		gestures=("kb:numpadPlus", "kb(laptop):NVDA+shift+a", "ts(text):3finger_flickDown")
 	)
-	def script_review_sayAll(self,gesture):
+	def script_review_sayAll(self, gesture: inputCore.InputGesture):
+		# This script is available on the lock screen via getSafeScripts
+		# SayAll.nextLine ensures insecure text is not announced.
 		sayAll.SayAllHandler.readText(sayAll.CURSOR.REVIEW)
 
 	@script(
@@ -1784,7 +2144,7 @@ class GlobalCommands(ScriptableObject):
 		category=SCRCAT_SYSTEMCARET,
 		gestures=("kb(desktop):NVDA+downArrow", "kb(laptop):NVDA+a")
 	)
-	def script_sayAll(self,gesture):
+	def script_sayAll(self, gesture: inputCore.InputGesture):
 		sayAll.SayAllHandler.readText(sayAll.CURSOR.CARET)
 
 	def _reportFormattingHelper(self, info, browseable=False):
@@ -1799,6 +2159,7 @@ class GlobalCommands(ScriptableObject):
 			"reportFontSize",
 			"reportFontAttributes",
 			"reportSuperscriptsAndSubscripts",
+			"reportHighlight",
 			"reportColor",
 			"reportStyle",
 			"reportAlignment",
@@ -1806,8 +2167,7 @@ class GlobalCommands(ScriptableObject):
 			"reportLineIndentation",
 			"reportParagraphIndentation",
 			"reportLineSpacing",
-			"reportBorderStyle",
-			"reportBorderColor",
+			"reportCellBorders",
 		)
 
 		# Create a dictionary to replace the config section that would normally be
@@ -1953,6 +2313,54 @@ class GlobalCommands(ScriptableObject):
 		elif repeats == 1:
 			self.script_showFormattingAtCaret(gesture)
 
+	def _getNvdaObjWithAnnotationUnderCaret(self) -> Optional[NVDAObject]:
+		"""If it has an annotation, get the NVDA object for the single character under the caret or the object
+		with system focus.
+		@note: It is tempting to try to report any annotation details that exists in the range formed by prior
+			and current location. This would be a new paradigm in NVDA, and may feel natural when moving by line
+			to be able to more quickly have the 'details' reported. However, there may be more than one 'details
+			relation' in that range, and we don't yet have a way for the user to select which one to report.
+			For now, we minimise this risk by only reporting details at the current location.
+		"""
+		try:
+			# Common cases use Caret Position: vbuf available or object supports text range
+			# Eg editable text, or regular web content
+			# Firefox and Chromium support this even in a button within a role=application.
+			caret: textInfos.TextInfo = api.getCaretPosition()
+		except RuntimeError:
+			log.debugWarning("Unable to get the caret position.", exc_info=True)
+			return None
+		caret.expand(textInfos.UNIT_CHARACTER)
+		objAtStart: NVDAObject = caret.NVDAObjectAtStart
+		_isDebugLogCatEnabled = bool(config.conf["debugLog"]["annotations"])
+		if _isDebugLogCatEnabled:
+			log.debug(f"Trying with nvdaObject : {objAtStart}")
+
+		if objAtStart.annotations:
+			if _isDebugLogCatEnabled:
+				log.debug(f"NVDAObjectAtStart of caret has details")
+			return objAtStart
+		elif api.getFocusObject():
+			# If fetching from the caret position fails, try via the focus object
+			# This case is to support where there is no virtual buffer or text interface and a caret position can
+			# not be fetched.
+			# There may still be an object with focus that has details.
+			# There isn't a known test case for this, however there isn't a known downside to attempt this.
+			focus = api.getFocusObject()
+			if _isDebugLogCatEnabled:
+				log.debug(f"Trying focus object: {focus}")
+
+			if objAtStart.annotations:
+				if _isDebugLogCatEnabled:
+					log.debug("focus object has details, able to proceed")
+				return focus
+
+		if _isDebugLogCatEnabled:
+			log.debug("no details annotation found")
+		return None
+
+	_annotationNav = _AnnotationNavigation()
+
 	@script(
 		gesture="kb:NVDA+d",
 		description=_(
@@ -1961,7 +2369,7 @@ class GlobalCommands(ScriptableObject):
 		),
 		category=SCRCAT_SYSTEMCARET,
 	)
-	def script_reportDetailsSummary(self, gesture):
+	def script_reportDetailsSummary(self, gesture: inputCore.InputGesture):
 		"""Report the annotation details summary for the single character under the caret or the object with
 		system focus.
 		@note: It is tempting to try to report any annotation details that exists in the range formed by prior
@@ -1970,45 +2378,53 @@ class GlobalCommands(ScriptableObject):
 			relation' in that range, and we don't yet have a way for the user to select which one to report.
 			For now, we minimise this risk by only reporting details at the current location.
 		"""
-		log.debug("Report annotation details summary at current location.")
-		try:
-			# Common cases use Caret Position: vbuf available or object supports text range
-			# Eg editable text, or regular web content
-			# Firefox and Chromium support this even in a button within a role=application.
-			caret: textInfos.TextInfo = api.getCaretPosition()
-		except RuntimeError:
-			log.debugWarning("Unable to get the caret position.", exc_info=True)
-			return
-		caret.expand(textInfos.UNIT_CHARACTER)
-		nvdaObject: NVDAObject = caret.NVDAObjectAtStart
-		if config.conf["debugLog"]["annotations"]:
-			log.debug(f"Trying with nvdaObject : {nvdaObject}")
-
-		annotation: Optional[str] = nvdaObject.detailsSummary
-		if annotation:
-			log.debug("NVDAObjectAtStart of caret has details.")
-		elif api.getFocusObject():
-			# If fetching from the caret position fails, try via the focus object
-			# This case is to support where there is no virtual buffer or text interface and a caret position can
-			# not be fetched.
-			# There may still be an object with focus that has details.
-			# There isn't a known test case for this, however there isn't a known downside to attempt this.
-			focus = api.getFocusObject()
-			if config.conf["debugLog"]["annotations"]:
-				log.debug(f"Trying focus object: {focus}")
-			annotation = focus.detailsSummary
-			if annotation:
-				if config.conf["debugLog"]["annotations"]:
-					log.debug("focus object has details, able to proceed")
-
-		if not annotation:
-			if config.conf["debugLog"]["annotations"]:
-				log.debug("no details annotation found")
+		_isDebugLogCatEnabled = config.conf["debugLog"]["annotations"]
+		objWithAnnotation = self._getNvdaObjWithAnnotationUnderCaret()
+		if (
+			not objWithAnnotation
+			or not objWithAnnotation.annotations
+		):
 			# Translators: message given when there is no annotation details for the reportDetailsSummary script.
 			ui.message(_("No additional details"))
 			return
 
-		ui.message(annotation)
+		targets = objWithAnnotation.annotations.targets
+		if _isDebugLogCatEnabled:
+			log.debug(f"Number of targets: {len(targets)}")
+
+		if 1 > len(targets):
+			if _isDebugLogCatEnabled:
+				log.debugWarning("Expected some annotation targets, none retrieved.")
+			return
+
+		if (
+			self._annotationNav.lastReported
+			and objWithAnnotation == self._annotationNav.lastReported.origin
+			and None is not self._annotationNav.lastReported.indexOfLastReportedSummary
+		):
+			last = self._annotationNav.lastReported.indexOfLastReportedSummary
+			indexOfNextTarget = (last + 1) % len(targets)
+		else:
+			if _isDebugLogCatEnabled:
+				log.debug(
+					"No prior target summary reported:"
+					f" lastReported: {self._annotationNav.lastReported}"
+				)
+			if self._annotationNav.lastReported and _isDebugLogCatEnabled:
+				log.debug(
+					f" objWithAnnotation == self._annotationNav.lastReported.origin: "
+					f"{objWithAnnotation == self._annotationNav.lastReported.origin}"
+					f" self._annotationNav.lastReported.indexOfLastReportedSummary: "
+					f"{self._annotationNav.lastReported.indexOfLastReportedSummary}"
+				)
+			indexOfNextTarget = 0
+
+		targetToReport = targets[indexOfNextTarget]
+		ui.message(targetToReport.summary)
+		self._annotationNav.lastReported = _AnnotationNavigationNode(
+			origin=objWithAnnotation,
+			indexOfLastReportedSummary=indexOfNextTarget
+		)
 		return
 
 	@script(
@@ -2017,15 +2433,26 @@ class GlobalCommands(ScriptableObject):
 		category=SCRCAT_FOCUS,
 		gesture="kb:NVDA+tab"
 	)
-	def script_reportCurrentFocus(self,gesture):
+	def script_reportCurrentFocus(self, gesture: inputCore.InputGesture):
 		focusObject=api.getFocusObject()
-		if isinstance(focusObject,NVDAObject):
-			if scriptHandler.getLastScriptRepeatCount()==0:
-				speech.speakObject(focusObject, reason=controlTypes.OutputReason.QUERY)
-			else:
-				speech.speakSpelling(focusObject.name)
-		else:
+		if not isinstance(focusObject, NVDAObject):
+			# Translators: Reported when:
+			# 1. There is no focusable object e.g. cannot use tab and shift tab to move to controls.
+			# 2. Trying to move focus to navigator object but there is no focus.
 			ui.message(_("No focus"))
+			return
+
+		if objectBelowLockScreenAndWindowsIsLocked(focusObject):
+			# This script is available on the lock screen via getSafeScripts, as such
+			# ensure the focus object does not contain secure information
+			# before announcing this object
+			ui.message(gui.blockAction.Context.WINDOWS_LOCKED.translatedMessage)
+			return
+
+		if scriptHandler.getLastScriptRepeatCount() == 0:
+			speech.speakObject(focusObject, reason=controlTypes.OutputReason.QUERY)
+		else:
+			speech.speakSpelling(focusObject.name)
 
 	@staticmethod
 	def _getStatusBarText(setReviewCursor: bool = False) -> Optional[str]:
@@ -2034,10 +2461,17 @@ class GlobalCommands(ScriptableObject):
 		"""
 		obj = api.getStatusBar()
 		found = False
-		if obj:
+		if (
+			obj
+			# This script is available on the lock screen via getSafeScripts, as such
+			# ensure the status bar does not contain secure information
+			# before announcing this object
+			and not objectBelowLockScreenAndWindowsIsLocked(obj)
+		):
 			text = api.getStatusBarText(obj)
 			if setReviewCursor:
-				api.setNavigatorObject(obj)
+				if not api.setNavigatorObject(obj):
+					return None
 			found = True
 		else:
 			foreground = api.getForegroundObject()
@@ -2049,7 +2483,13 @@ class GlobalCommands(ScriptableObject):
 					info.expand(textInfos.UNIT_STORY)
 					info.collapse(True)
 					info.expand(textInfos.UNIT_LINE)
-			if info:
+			if (
+				info
+				# This script is available on the lock screen via getSafeScripts, as such
+				# ensure the status bar does not contain secure information
+				# before announcing this object
+				and not objectBelowLockScreenAndWindowsIsLocked(info.obj)
+			):
 				text = info.text
 				info.collapse()
 				if setReviewCursor:
@@ -2059,6 +2499,8 @@ class GlobalCommands(ScriptableObject):
 			# Translators: Reported when there is no status line for the current program or window.
 			ui.message(_("No status line found"))
 			return None
+		# Ensure any text comes from objects that have been
+		# checked with objectBelowLockScreenAndWindowsIsLocked
 		return text
 
 	@script(
@@ -2152,6 +2594,25 @@ class GlobalCommands(ScriptableObject):
 			self.script_copyStatusLine(gesture)
 
 	@script(
+		description=_(
+			# Translators: Description for a keyboard command which reports the
+			# accelerator key of the currently focused object.
+			"Reports the shortcut key of the currently focused object",
+		),
+		category=SCRCAT_FOCUS,
+		gestures=("kb:shift+numpad2", "kb(laptop):NVDA+control+shift+."),
+	)
+	def script_reportFocusObjectAccelerator(self, gesture: inputCore.InputGesture) -> None:
+		obj = api.getFocusObject()
+		if obj.keyboardShortcut:
+			res = obj.keyboardShortcut
+		else:
+			# Translators: reported when a user requests the accelerator key
+			# of the currently focused object, but there is none set.
+			res = _("No shortcut key")
+		ui.message(res)
+
+	@script(
 		# Translators: Input help mode message for toggle mouse tracking command.
 		description=_("Toggles the reporting of information as the mouse moves"),
 		category=SCRCAT_MOUSE,
@@ -2199,8 +2660,14 @@ class GlobalCommands(ScriptableObject):
 		category=SCRCAT_FOCUS,
 		gesture="kb:NVDA+t"
 	)
-	def script_title(self,gesture):
+	def script_title(self, gesture: inputCore.InputGesture):
 		obj=api.getForegroundObject()
+		# This script is available on the lock screen via getSafeScripts, as such
+		# ensure the title does not contain secure information
+		# before announcing this object
+		if objectBelowLockScreenAndWindowsIsLocked(obj):
+			ui.message(gui.blockAction.Context.WINDOWS_LOCKED.translatedMessage)
+			return
 		title=obj.name
 		if not isinstance(title,str) or not title or title.isspace():
 			title=obj.appModule.appName if obj.appModule else None
@@ -2308,7 +2775,6 @@ class GlobalCommands(ScriptableObject):
 	)
 	@gui.blockAction.when(gui.blockAction.Context.SECURE_MODE)
 	def script_openUserConfigurationDirectory(self, gesture):
-		import systemUtils
 		systemUtils.openUserConfigurationDirectory()
 
 	@script(
@@ -2417,26 +2883,8 @@ class GlobalCommands(ScriptableObject):
 		category=SCRCAT_SYSTEM,
 		gesture="kb:NVDA+shift+b"
 	)
-	def script_say_battery_status(self,gesture):
-		UNKNOWN_BATTERY_STATUS = 0xFF
-		AC_ONLINE = 0X1
-		NO_SYSTEM_BATTERY = 0X80
-		sps = winKernel.SYSTEM_POWER_STATUS()
-		if not winKernel.GetSystemPowerStatus(sps) or sps.BatteryFlag is UNKNOWN_BATTERY_STATUS:
-			log.error("error accessing system power status")
-			return
-		if sps.BatteryFlag & NO_SYSTEM_BATTERY:
-			# Translators: This is presented when there is no battery such as desktop computers and laptops with battery pack removed.
-			ui.message(_("No system battery"))
-			return
-		# Translators: This is presented to inform the user of the current battery percentage.
-		text = _("%d percent") % sps.BatteryLifePercent + " "
-		# Translators: This is presented when AC power is connected such as when recharging a laptop battery.
-		if sps.ACLineStatus & AC_ONLINE: text += _("AC power on")
-		elif sps.BatteryLifeTime!=0xffffffff: 
-			# Translators: This is the estimated remaining runtime of the laptop battery.
-			text += _("{hours:d} hours and {minutes:d} minutes remaining") .format(hours=sps.BatteryLifeTime // 3600, minutes=(sps.BatteryLifeTime % 3600) // 60)
-		ui.message(text)
+	def script_say_battery_status(self, gesture: inputCore.InputGesture) -> None:
+		reportCurrentBatteryStatus()
 
 	@script(
 		description=_(
@@ -2481,6 +2929,7 @@ class GlobalCommands(ScriptableObject):
 		category=SCRCAT_CONFIG,
 		gesture="kb:NVDA+control+g"
 	)
+	@gui.blockAction.when(gui.blockAction.Context.MODAL_DIALOG_OPEN)
 	def script_activateGeneralSettingsDialog(self, gesture):
 		wx.CallAfter(gui.mainFrame.onGeneralSettingsCommand, None)
 
@@ -2490,6 +2939,7 @@ class GlobalCommands(ScriptableObject):
 		category=SCRCAT_CONFIG,
 		gesture="kb:NVDA+control+s"
 	)
+	@gui.blockAction.when(gui.blockAction.Context.MODAL_DIALOG_OPEN)
 	def script_activateSynthesizerDialog(self, gesture):
 		wx.CallAfter(gui.mainFrame.onSelectSynthesizerCommand, None)
 
@@ -2499,6 +2949,7 @@ class GlobalCommands(ScriptableObject):
 		category=SCRCAT_CONFIG,
 		gesture="kb:NVDA+control+v"
 	)
+	@gui.blockAction.when(gui.blockAction.Context.MODAL_DIALOG_OPEN)
 	def script_activateVoiceDialog(self, gesture):
 		wx.CallAfter(gui.mainFrame.onSpeechSettingsCommand, None)
 
@@ -2508,6 +2959,7 @@ class GlobalCommands(ScriptableObject):
 		category=SCRCAT_CONFIG,
 		gesture="kb:NVDA+control+a"
 	)
+	@gui.blockAction.when(gui.blockAction.Context.MODAL_DIALOG_OPEN)
 	def script_activateBrailleDisplayDialog(self, gesture):
 		wx.CallAfter(gui.mainFrame.onSelectBrailleDisplayCommand, None)
 
@@ -2516,6 +2968,7 @@ class GlobalCommands(ScriptableObject):
 		description=_("Shows NVDA's braille settings"),
 		category=SCRCAT_CONFIG
 	)
+	@gui.blockAction.when(gui.blockAction.Context.MODAL_DIALOG_OPEN)
 	def script_activateBrailleSettingsDialog(self, gesture):
 		wx.CallAfter(gui.mainFrame.onBrailleSettingsCommand, None)
 
@@ -2525,6 +2978,7 @@ class GlobalCommands(ScriptableObject):
 		category=SCRCAT_CONFIG,
 		gesture="kb:NVDA+control+k"
 	)
+	@gui.blockAction.when(gui.blockAction.Context.MODAL_DIALOG_OPEN)
 	def script_activateKeyboardSettingsDialog(self, gesture):
 		wx.CallAfter(gui.mainFrame.onKeyboardSettingsCommand, None)
 
@@ -2534,6 +2988,7 @@ class GlobalCommands(ScriptableObject):
 		category=SCRCAT_CONFIG,
 		gesture="kb:NVDA+control+m"
 	)
+	@gui.blockAction.when(gui.blockAction.Context.MODAL_DIALOG_OPEN)
 	def script_activateMouseSettingsDialog(self, gesture):
 		wx.CallAfter(gui.mainFrame.onMouseSettingsCommand, None)
 
@@ -2542,6 +2997,7 @@ class GlobalCommands(ScriptableObject):
 		description=_("Shows NVDA's review cursor settings"),
 		category=SCRCAT_CONFIG
 	)
+	@gui.blockAction.when(gui.blockAction.Context.MODAL_DIALOG_OPEN)
 	def script_activateReviewCursorDialog(self, gesture):
 		wx.CallAfter(gui.mainFrame.onReviewCursorCommand, None)
 
@@ -2550,6 +3006,7 @@ class GlobalCommands(ScriptableObject):
 		description=_("Shows NVDA's input composition settings"),
 		category=SCRCAT_CONFIG
 	)
+	@gui.blockAction.when(gui.blockAction.Context.MODAL_DIALOG_OPEN)
 	def script_activateInputCompositionDialog(self, gesture):
 		wx.CallAfter(gui.mainFrame.onInputCompositionCommand, None)
 
@@ -2559,6 +3016,7 @@ class GlobalCommands(ScriptableObject):
 		category=SCRCAT_CONFIG,
 		gesture="kb:NVDA+control+o"
 	)
+	@gui.blockAction.when(gui.blockAction.Context.MODAL_DIALOG_OPEN)
 	def script_activateObjectPresentationDialog(self, gesture):
 		wx.CallAfter(gui.mainFrame. onObjectPresentationCommand, None)
 
@@ -2568,6 +3026,7 @@ class GlobalCommands(ScriptableObject):
 		category=SCRCAT_CONFIG,
 		gesture="kb:NVDA+control+b"
 	)
+	@gui.blockAction.when(gui.blockAction.Context.MODAL_DIALOG_OPEN)
 	def script_activateBrowseModeDialog(self, gesture):
 		wx.CallAfter(gui.mainFrame.onBrowseModeCommand, None)
 
@@ -2577,6 +3036,7 @@ class GlobalCommands(ScriptableObject):
 		category=SCRCAT_CONFIG,
 		gesture="kb:NVDA+control+d"
 	)
+	@gui.blockAction.when(gui.blockAction.Context.MODAL_DIALOG_OPEN)
 	def script_activateDocumentFormattingDialog(self, gesture):
 		wx.CallAfter(gui.mainFrame.onDocumentFormattingCommand, None)
 
@@ -2585,6 +3045,7 @@ class GlobalCommands(ScriptableObject):
 		description=_("Shows the NVDA default dictionary dialog"),
 		category=SCRCAT_CONFIG
 	)
+	@gui.blockAction.when(gui.blockAction.Context.MODAL_DIALOG_OPEN)
 	def script_activateDefaultDictionaryDialog(self, gesture):
 		wx.CallAfter(gui.mainFrame.onDefaultDictionaryCommand, None)
 
@@ -2593,6 +3054,7 @@ class GlobalCommands(ScriptableObject):
 		description=_("Shows the NVDA voice-specific dictionary dialog"),
 		category=SCRCAT_CONFIG
 	)
+	@gui.blockAction.when(gui.blockAction.Context.MODAL_DIALOG_OPEN)
 	def script_activateVoiceDictionaryDialog(self, gesture):
 		wx.CallAfter(gui.mainFrame.onVoiceDictionaryCommand, None)
 
@@ -2601,6 +3063,7 @@ class GlobalCommands(ScriptableObject):
 		description=_("Shows the NVDA temporary dictionary dialog"),
 		category=SCRCAT_CONFIG
 	)
+	@gui.blockAction.when(gui.blockAction.Context.MODAL_DIALOG_OPEN)
 	def script_activateTemporaryDictionaryDialog(self, gesture):
 		wx.CallAfter(gui.mainFrame.onTemporaryDictionaryCommand, None)
 
@@ -2609,6 +3072,7 @@ class GlobalCommands(ScriptableObject):
 		description=_("Shows the NVDA symbol pronunciation dialog"),
 		category=SCRCAT_CONFIG
 	)
+	@gui.blockAction.when(gui.blockAction.Context.MODAL_DIALOG_OPEN)
 	def script_activateSpeechSymbolsDialog(self, gesture):
 		wx.CallAfter(gui.mainFrame.onSpeechSymbolsCommand, None)
 
@@ -2617,6 +3081,7 @@ class GlobalCommands(ScriptableObject):
 		description=_("Shows the NVDA input gestures dialog"),
 		category=SCRCAT_CONFIG
 	)
+	@gui.blockAction.when(gui.blockAction.Context.MODAL_DIALOG_OPEN)
 	def script_activateInputGesturesDialog(self, gesture):
 		wx.CallAfter(gui.mainFrame.onInputGesturesCommand, None)
 
@@ -2685,12 +3150,12 @@ class GlobalCommands(ScriptableObject):
 		pythonConsole.activate()
 
 	@script(
-		# Translators: Input help mode message for activate manage add-ons command.
-		description=_("Activates the NVDA Add-ons Manager to install and uninstall add-on packages for NVDA"),
+		# Translators: Input help mode message to activate Add-on Store command.
+		description=_("Activates the Add-on Store to browse and manage add-on packages for NVDA"),
 		category=SCRCAT_TOOLS
 	)
-	def script_activateAddonsManager(self,gesture):
-		wx.CallAfter(gui.mainFrame.onAddonsManagerCommand, None)
+	def script_activateAddonsManager(self, gesture: inputCore.InputGesture):
+		wx.CallAfter(gui.mainFrame.onAddonStoreCommand, None)
 
 	@script(
 		description=_(
@@ -2743,29 +3208,57 @@ class GlobalCommands(ScriptableObject):
 		gesture="kb:NVDA+control+t"
 	)
 	def script_braille_toggleTether(self, gesture):
-		values = [x[0] for x in braille.handler.tetherValues]
-		labels = [x[1] for x in braille.handler.tetherValues]
-		try:
-			index = values.index(
-				braille.handler.TETHER_AUTO if config.conf["braille"]["autoTether"] else config.conf["braille"]["tetherTo"]
-			)
-		except:
-			index=0
+		values = [x.value for x in TetherTo]
+		index = values.index(config.conf["braille"]["tetherTo"])
 		newIndex = (index+1) % len(values)
 		newTetherChoice = values[newIndex]
-		if newTetherChoice==braille.handler.TETHER_AUTO:
-			config.conf["braille"]["autoTether"] = True
-			config.conf["braille"]["tetherTo"] = braille.handler.TETHER_FOCUS
+		if newTetherChoice == TetherTo.AUTO.value:
+			config.conf["braille"]["tetherTo"] = TetherTo.AUTO.value
 		else:
-			config.conf["braille"]["autoTether"] = False
 			braille.handler.setTether(newTetherChoice, auto=False)
-			if newTetherChoice==braille.handler.TETHER_REVIEW:
+			if newTetherChoice == TetherTo.REVIEW.value:
 				braille.handler.handleReviewMove(shouldAutoTether=False)
 			else:
 				braille.handler.handleGainFocus(api.getFocusObject(),shouldAutoTether=False)
 		# Translators: Reports which position braille is tethered to
 		# (braille can be tethered automatically or to either focus or review position).
-		ui.message(_("Braille tethered %s") % labels[newIndex])
+		ui.message(_("Braille tethered %s") % TetherTo(newTetherChoice).displayString)
+
+	@script(
+		# Translators: Input help mode message for cycle through
+		# braille move system caret when routing review cursor command.
+		description=_("Cycle through the braille move system caret when routing review cursor states"),
+		category=SCRCAT_BRAILLE
+	)
+	def script_braille_cycleReviewRoutingMovesSystemCaret(self, gesture: inputCore.InputGesture) -> None:
+		# If braille is not tethered to focus, set next state of
+		# braille Move system caret when routing review cursor.
+		if TetherTo.FOCUS.value == config.conf["braille"]["tetherTo"]:
+			ui.message(
+				# Translators: Reported when action is unavailable because braille tether is to focus.
+				_("Action unavailable. Braille is tethered to focus")
+			)
+			return
+		featureFlag: FeatureFlag = config.conf["braille"]["reviewRoutingMovesSystemCaret"]
+		reviewRoutingMovesSystemCaretFlag = featureFlag.enumClassType
+		values = [x.value for x in reviewRoutingMovesSystemCaretFlag]
+		currentValue = featureFlag.value.value
+		nextValueIndex = (currentValue % len(values)) + 1
+		nextName: str = reviewRoutingMovesSystemCaretFlag(nextValueIndex).name
+		config.conf["braille"]["reviewRoutingMovesSystemCaret"] = nextName
+		featureFlag = config.conf["braille"]["reviewRoutingMovesSystemCaret"]
+		if featureFlag.isDefault():
+			msg = _(
+				# Translators: Used when reporting braille move system caret when routing review cursor
+				# state (default behavior).
+				"Braille move system caret when routing review cursor default (%s)"
+			) % featureFlag.behaviorOfDefault.displayString
+		else:
+			msg = _(
+				# Translators: Used when reporting braille move system caret when routing review cursor state.
+				"Braille move system caret when routing review cursor %s"
+			) % reviewRoutingMovesSystemCaretFlag[nextName].displayString
+		ui.message(msg)
 
 	@script(
 		# Translators: Input help mode message for toggle braille focus context presentation command.
@@ -2802,6 +3295,8 @@ class GlobalCommands(ScriptableObject):
 			# Translators: The message announced when toggling the braille cursor.
 			state = _("Braille cursor on")
 			config.conf["braille"]["showCursor"]=True
+		# To hide or show cursor immediately on braille line
+		braille.handler._updateDisplay()
 		ui.message(state)
 
 	@script(
@@ -2815,7 +3310,7 @@ class GlobalCommands(ScriptableObject):
 			ui.message(_("Braille cursor is turned off"))
 			return
 		shapes = [s[0] for s in braille.CURSOR_SHAPES]
-		if braille.handler.getTether() == braille.handler.TETHER_FOCUS:
+		if braille.handler.getTether() == TetherTo.FOCUS.value:
 			cursorShape = "cursorShapeFocus"
 		else:
 			cursorShape = "cursorShapeReview"
@@ -2829,6 +3324,50 @@ class GlobalCommands(ScriptableObject):
 		shapeMsg = braille.CURSOR_SHAPES[index][1]
 		# Translators: Reports which braille cursor shape is activated.
 		ui.message(_("Braille cursor %s") % shapeMsg)
+
+	@script(
+		# Translators: Input help mode message for cycle through braille show messages command.
+		description=_("Cycle through the braille show messages modes"),
+		category=SCRCAT_BRAILLE
+	)
+	def script_braille_cycleShowMessages(self, gesture: inputCore.InputGesture) -> None:
+		"""Set next state of braille show messages and reports it with ui.message."""
+		values = [x.value for x in ShowMessages]
+		index = values.index(config.conf["braille"]["showMessages"])
+		newIndex = (index + 1) % len(values)
+		newValue = values[newIndex]
+		config.conf["braille"]["showMessages"] = newValue
+		# Translators: Reports which show braille message mode is used
+		# (disabled, timeout or indefinitely).
+		msg = _("Braille show messages %s") % ShowMessages(newValue).displayString
+		ui.message(msg)
+
+	@script(
+		# Translators: Input help mode message for cycle through braille show selection command.
+		description=_("Cycle through the braille show selection states"),
+		category=SCRCAT_BRAILLE
+	)
+	def script_braille_cycleShowSelection(self, gesture: inputCore.InputGesture) -> None:
+		"""Set next state of braille show selection and reports it with ui.message."""
+		featureFlag: FeatureFlag = config.conf["braille"]["showSelection"]
+		boolFlag: BoolFlag = featureFlag.enumClassType
+		values = [x.value for x in boolFlag]
+		currentValue = featureFlag.value.value
+		nextValueIndex = (currentValue % len(values)) + 1
+		nextName: str = boolFlag(nextValueIndex).name
+		config.conf["braille"]["showSelection"] = nextName
+		featureFlag = config.conf["braille"]["showSelection"]
+		if featureFlag.isDefault():
+			# Translators: Used when reporting braille show selection state
+			# (default behavior).
+			msg = _("Braille show selection default (%s)") % featureFlag.behaviorOfDefault.displayString
+		else:
+			# Translators: Reports which show braille selection state is used
+			# (disabled or enabled).
+			msg = _("Braille show selection %s") % BoolFlag[nextName].displayString
+		# To hide or show selection immediately on braille line
+		braille.handler.initialDisplay()
+		ui.message(msg)
 
 	@script(
 		# Translators: Input help mode message for report clipboard text command.
@@ -2878,17 +3417,28 @@ class GlobalCommands(ScriptableObject):
 		category=SCRCAT_TEXTREVIEW,
 		gesture="kb:NVDA+shift+F9"
 	)
-	def script_review_moveToStartMarkedForCopy(self, gesture):
+	def script_review_moveToStartMarkedForCopy(self, gesture: inputCore.InputGesture):
 		pos = api.getReviewPosition()
 		if not getattr(pos.obj, "_copyStartMarker", None):
 			# Translators: Presented when attempting to move to the start marker for copy but none has been set.
 			ui.reviewMessage(_("No start marker set"))
 			return
 		startMarker = pos.obj._copyStartMarker.copy()
-		api.setReviewPosition(startMarker)
-		startMarker.collapse()
-		startMarker.expand(textInfos.UNIT_CHARACTER)
-		speech.speakTextInfo(startMarker, unit=textInfos.UNIT_CHARACTER, reason=controlTypes.OutputReason.CARET)
+		# This script is available on the lock screen via getSafeScripts,
+		# as such observe the setReviewPosition result to ensure
+		# the review position does not contain secure information
+		# before announcing this object
+		if api.setReviewPosition(startMarker):
+			startMarker.collapse()
+			startMarker.expand(textInfos.UNIT_CHARACTER)
+			speech.speakTextInfo(
+				startMarker,
+				unit=textInfos.UNIT_CHARACTER,
+				reason=controlTypes.OutputReason.CARET
+			)
+		else:
+			ui.reviewMessage(gui.blockAction.Context.WINDOWS_LOCKED.translatedMessage)
+			return
 
 	@script(
 		description=_(
@@ -3036,8 +3586,8 @@ class GlobalCommands(ScriptableObject):
 		category=SCRCAT_BRAILLE
 	)
 	def script_braille_toFocus(self, gesture):
-		braille.handler.setTether(braille.handler.TETHER_FOCUS, auto=True)
-		if braille.handler.getTether() == braille.handler.TETHER_REVIEW:
+		braille.handler.setTether(TetherTo.FOCUS.value, auto=True)
+		if braille.handler.getTether() == TetherTo.REVIEW.value:
 			self.script_navigatorObject_toFocus(gesture)
 		else:
 			obj = api.getFocusObject()
@@ -3207,12 +3757,91 @@ class GlobalCommands(ScriptableObject):
 		ui.message(_("Plugins reloaded"))
 
 	@script(
+		description=_(
+			# Translators: input help mode message for Report destination URL of a link command
+			"Report the destination URL of the link at the position of caret or focus. "
+			"If pressed twice, shows the URL in a window for easier review."
+		),
+		gesture="kb:NVDA+k",
+		category=SCRCAT_TOOLS
+	)
+	def script_reportLinkDestination(
+			self, gesture: inputCore.InputGesture, forceBrowseable: bool = False
+	) -> None:
+		"""Generates a ui.message or ui.browseableMessage of a link's destination, if focus or caret is
+		positioned on a link, or an element with an included link such as a graphic.
+		@param forceBrowseable: skips the press once check, and displays the browseableMessage version.
+		"""
+		try:
+			ti: textInfos.TextInfo = api.getCaretPosition()
+		except RuntimeError:
+			log.debugWarning("Unable to get the caret position.", exc_info=True)
+			ti: textInfos.TextInfo = api.getFocusObject().makeTextInfo(textInfos.POSITION_FIRST)
+		ti.expand(textInfos.UNIT_CHARACTER)
+		obj: NVDAObject = ti.NVDAObjectAtStart
+		presses = scriptHandler.getLastScriptRepeatCount()
+		if (
+			obj.role == controlTypes.role.Role.GRAPHIC
+			and (
+				obj.parent
+				and obj.parent.role == controlTypes.role.Role.LINK
+			)
+		):
+			# In Firefox, graphics with a parent link also expose the parents link href value.
+			# In Chromium, the link href value must be fetched from the parent object. (#14779)
+			obj = obj.parent
+		if (
+			obj.role == controlTypes.role.Role.LINK  # If it's a link, or
+			or controlTypes.state.State.LINKED in obj.states  # if it isn't a link but contains one
+		):
+			linkDestination = obj.value
+			if linkDestination is None:
+				# Translators: Informs the user that the link has no destination
+				ui.message(_("Link has no apparent destination"))
+				return
+			if (
+				presses == 1  # If pressed twice, or
+				or forceBrowseable  # if a browseable message is preferred unconditionally
+			):
+				ui.browseableMessage(
+					linkDestination,
+					# Translators: Informs the user that the window contains the destination of the
+					# link with given title
+					title=_("Destination of: {name}").format(name=obj.name)
+				)
+			elif presses == 0:  # One press
+				ui.message(linkDestination)  # Speak the link
+			else:  # Some other number of presses
+				return  # Do nothing
+		else:
+			# Translators: Tell user that the command has been run on something that is not a link
+			ui.message(_("Not a link."))
+
+	@script(
+		description=_(
+			# Translators: input help mode message for Report URL of a link in a window command
+			"Displays the destination URL of the link at the position of caret or focus in a window, "
+			"instead of just speaking it. May be preferred by braille users."
+		),
+		category=SCRCAT_TOOLS
+	)
+	def script_reportLinkDestinationInWindow(self, gesture: inputCore.InputGesture) -> None:
+		"""Uses the forceBrowseable flag of script_reportLinkDestination, to generate a
+		ui.browseableMessage of a link's destination.
+		"""
+		self.script_reportLinkDestination(gesture, True)
+
+	@script(
 		# Translators: Input help mode message for a touchscreen gesture.
 		description=_("Moves to the next object in a flattened view of the object navigation hierarchy"),
 		category=SCRCAT_OBJECTNAVIGATION,
-		gesture="ts(object):flickright"
+		gestures=(
+			"ts(object):flickright",
+			"kb:NVDA+numpad3",
+			"kb(laptop):shift+NVDA+]",
+		),
 	)
-	def script_navigatorObject_nextInFlow(self,gesture):
+	def script_navigatorObject_nextInFlow(self, gesture: inputCore.InputGesture):
 		curObject=api.getNavigatorObject()
 		newObject=None
 		if curObject.simpleFirstChild:
@@ -3225,20 +3854,32 @@ class GlobalCommands(ScriptableObject):
 				parent=parent.simpleParent
 			if parent:
 				newObject=parent.simpleNext
-		if newObject:
-			api.setNavigatorObject(newObject)
-			speech.speakObject(newObject, reason=controlTypes.OutputReason.FOCUS)
-		else:
+		if not newObject:
 			# Translators: a message when there is no next object when navigating
 			ui.reviewMessage(_("No next"))
+			return
+
+		# This script is available on the lock screen via getSafeScripts,
+		# as such observe the setNavigatorObject result to ensure
+		# the navigatorObject does not contain secure information
+		# before announcing this object
+		if api.setNavigatorObject(newObject):
+			speech.speakObject(newObject, reason=controlTypes.OutputReason.FOCUS)
+		else:
+			ui.reviewMessage(gui.blockAction.Context.WINDOWS_LOCKED.translatedMessage)
+			return
 
 	@script(
 		# Translators: Input help mode message for a touchscreen gesture.
 		description=_("Moves to the previous object in a flattened view of the object navigation hierarchy"),
 		category=SCRCAT_OBJECTNAVIGATION,
-		gesture="ts(object):flickleft"
+		gestures=(
+			"ts(object):flickleft",
+			"kb:NVDA+numpad9",
+			"kb(laptop):shift+NVDA+[",
+		),
 	)
-	def script_navigatorObject_previousInFlow(self,gesture):
+	def script_navigatorObject_previousInFlow(self, gesture: inputCore.InputGesture):
 		curObject=api.getNavigatorObject()
 		newObject=curObject.simplePrevious
 		if newObject:
@@ -3246,12 +3887,20 @@ class GlobalCommands(ScriptableObject):
 				newObject=newObject.simpleLastChild
 		else:
 			newObject=curObject.simpleParent
-		if newObject:
-			api.setNavigatorObject(newObject)
-			speech.speakObject(newObject, reason=controlTypes.OutputReason.FOCUS)
-		else:
+
+		if not newObject:
 			# Translators: a message when there is no previous object when navigating
 			ui.reviewMessage(_("No previous"))
+			return
+
+		# This script is available on the lock screen via getSafeScripts, as such
+		# ensure the navigator object does not contain secure information
+		# before announcing this object
+		if api.setNavigatorObject(newObject):
+			speech.speakObject(newObject, reason=controlTypes.OutputReason.FOCUS)
+		else:
+			ui.reviewMessage(gui.blockAction.Context.WINDOWS_LOCKED.translatedMessage)
+			return
 
 	@script(
 		# Translators: Describes a command.
@@ -3443,9 +4092,26 @@ class GlobalCommands(ScriptableObject):
 		recog = uwpOcr.UwpOcr()
 		recogUi.recognizeNavigatorObject(recog)
 
-	_tempEnableScreenCurtain = True
-	_waitingOnScreenCurtainWarningDialog: Optional[wx.Dialog] = None
-	_toggleScreenCurtainMessage: Optional[str] = None
+	@script(
+		# Translators: Describes a command.
+		description=_("Cycles through the available languages for Windows OCR"),
+	)
+	def script_cycleOcrLanguage(self, gesture: inputCore.InputGesture) -> None:
+		if not winVersion.isUwpOcrAvailable():
+			# Translators: Reported when Windows OCR is not available.
+			ui.message(_("Windows OCR not available"))
+			return
+		from contentRecog import uwpOcr
+		languageCodes = uwpOcr.getLanguages()
+		try:
+			index = languageCodes.index(config.conf["uwpOcr"]["language"])
+			newIndex = (index + 1) % len(languageCodes)
+		except ValueError:
+			newIndex = 0
+		lang = languageCodes[newIndex]
+		config.conf["uwpOcr"]["language"] = lang
+		ui.message(languageHandler.getLanguageDescription(languageHandler.normalizeLanguage(lang)))
+
 	@script(
 		# Translators: Input help mode message for toggle report CLDR command.
 		description=_("Toggles on and off the reporting of CLDR characters, such as emojis"),
@@ -3463,6 +4129,9 @@ class GlobalCommands(ScriptableObject):
 		characterProcessing.clearSpeechSymbols()
 		ui.message(state)
 
+	_tempEnableScreenCurtain = True
+	_waitingOnScreenCurtainWarningDialog: Optional[wx.Dialog] = None
+	_toggleScreenCurtainMessage: Optional[str] = None
 	@script(
 		description=_(
 			# Translators: Describes a command.
@@ -3594,7 +4263,27 @@ class GlobalCommands(ScriptableObject):
 					)
 				)
 			else:
+				from contentRecog.recogUi import RefreshableRecogResultNVDAObject
+				focusObj = api.getFocusObject()
+				if isinstance(focusObj, RefreshableRecogResultNVDAObject) and focusObj.recognizer.allowAutoRefresh:
+					# Translators: Warning message when trying to enable the screen curtain when OCR is active.
+					warningMessage = _("Could not enable screen curtain when performing content recognition")
+					ui.message(warningMessage, speechPriority=speech.priorities.Spri.NOW)
+					return
 				_enableScreenCurtain()
+
+	@script(
+		description=_(
+			# Translators: Describes a command.
+			"Cycles through paragraph navigation styles",
+		),
+		category=SCRCAT_SYSTEMCARET
+	)
+	def script_cycleParagraphStyle(self, gesture: "inputCore.InputGesture") -> None:
+		from documentNavigation.paragraphHelper import nextParagraphStyle
+		newFlag: config.featureFlag.FeatureFlag = nextParagraphStyle()
+		config.conf["documentNavigation"]["paragraphStyle"] = newFlag.name
+		ui.message(newFlag.displayString)
 
 
 #: The single global commands instance.
