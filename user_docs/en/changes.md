@@ -15,6 +15,8 @@
 
 #### Braille
 
+* The "Prevent display from turning off during say all or reading with braille" setting now also applies while braille automatic scrolling is active. (#20790, @cary-rowen)
+
 #### Web browsers
 
 #### Applications
