@@ -15,7 +15,9 @@ class TestReader(unittest.TestCase):
 	@patch("speech.sayAll.systemUtils.preventSystemIdle")
 	@patch.object(sayAll._CaretTextReader, "getInitialTextInfo", side_effect=NotImplementedError)
 	def test_failedConstructionDoesNotPreventSystemIdle(
-		self, getInitialTextInfo: Mock, preventSystemIdle: Mock
+		self,
+		getInitialTextInfo: Mock,
+		preventSystemIdle: Mock,
 	) -> None:
 		with self.assertRaises(NotImplementedError):
 			sayAll._CaretTextReader(Mock())
