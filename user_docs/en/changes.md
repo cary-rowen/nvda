@@ -13,6 +13,8 @@
 
 #### Performance
 
+* The Add-on Store no longer becomes unresponsive when searching for add-ons with a one-character query. (#20886, @Cary-rowen)
+
 #### Braille
 
 #### Web browsers
