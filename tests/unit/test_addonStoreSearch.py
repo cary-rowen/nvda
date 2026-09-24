@@ -19,7 +19,7 @@ def _makeListItem(searchableText: str) -> AddonListItemVM:
 			displayName="Test add-on",
 			description=searchableText,
 			addonId="testAddon",
-		)
+		),
 	)
 
 
