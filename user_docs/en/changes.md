@@ -13,8 +13,6 @@
 
 #### Performance
 
-* The Add-on Store no longer becomes unresponsive when searching for add-ons with a one-character query. (#20886, @Cary-rowen)
-
 #### Braille
 
 #### Web browsers
@@ -24,6 +22,10 @@
 #### Applications
 
 * Fixed an issue where formulas and notes were not listed in Excel's elements list when it was opened from a sheet with multiple cells selected. (#20806, @CyrilleB79)
+
+#### Add-on Store
+
+* The Add-on Store no longer becomes unresponsive when searching for add-ons with a one-character query. (#20886, @Cary-rowen)
 
 ### Changes for Developers
 
